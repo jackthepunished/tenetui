@@ -4,7 +4,7 @@ version = "0.0.0"
 edition = "2024"
 description = "Scrub through a file's git history like a video timeline — forward and inverted."
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/emrecintass/tenetui"
+repository = "https://github.com/jackthepunished/tenetui"
 readme = "README.md"
 keywords = ["git", "tui", "history", "ratatui", "timeline"]
 categories = ["command-line-utilities", "development-tools"]
@@ -17,9 +17,17 @@ ratatui = "0.29"
 git2 = "0.19"
 lru = "0.12"
 similar = "2"
+syntect = { version = "5", default-features = false, features = [
+    "default-fancy",
+] }
 
 [dev-dependencies]
 tempfile = "3"
+criterion = "0.5"
+
+[[bench]]
+name = "hot_paths"
+harness = false
 
 [profile.release]
 lto = "thin"

@@ -1,29 +1,25 @@
 //! tenetui — scrub through a file's git history like a video timeline.
 //!
-//! Top-level responsibilities only: parse args, load the timeline + HEAD snapshot,
-//! set up/tear down the terminal, and run the one event loop. All git access is in
-//! `repo::`, all mutation in `app::update`, all rendering in `ui::`.
-
-mod app;
-mod diff;
-mod input;
-mod repo;
-mod theme;
-mod ui;
+//! The binary is a thin driver: parse args, load the timeline + HEAD snapshot,
+//! set up/tear down the terminal, and run the one event loop. Everything it
+//! coordinates lives in the `tenetui` library crate (see `lib.rs`). All git
+//! access is in `repo::`, all mutation in `app::update`, all rendering in `ui::`.
 
 use anyhow::{Context, Result};
-use app::{AppState, Direction};
 use clap::Parser;
 use crossterm::event::{self, Event, KeyEventKind};
 use git2::{Oid, Repository};
-use input::{Action, SearchAction};
 use ratatui::DefaultTerminal;
-use repo::SnapshotCache;
-use repo::blame::{BlameRequest, BlameResult};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
+use tenetui::app::{self, AppState, Direction};
+use tenetui::input::{self, Action, SearchAction};
+use tenetui::repo::blame::{BlameRequest, BlameResult};
+use tenetui::repo::{self, SnapshotCache};
+use tenetui::syntax::{HighlightRequest, HighlightResult};
+use tenetui::{diff, syntax, theme, ui};
 
 /// Snapshot cache capacity. Generously larger than the prefetch window (±20)
 /// so ordinary back-and-forth scrubbing stays warm too.
@@ -76,6 +72,10 @@ fn main() -> Result<()> {
     let state = AppState::new(theme::Theme::new(), rel.clone(), timeline.clone(), current);
     let mut engine = Engine::spawn(repo, cli.repo.clone(), rel, timeline, state.playhead);
 
+    // Kick off highlighting of the initial HEAD snapshot; it lands on an early
+    // frame (~20ms later) via the async worker rather than blocking startup.
+    engine.request_highlight(&state);
+
     // `ratatui::init` enables raw mode, enters the alternate screen, and installs
     // a panic hook that restores the terminal — so a crash never leaves it broken.
     let mut terminal = ratatui::init();
@@ -99,6 +99,10 @@ struct Engine {
     /// Bumped on every request sent; a result whose generation doesn't match
     /// this was superseded by a later move and is dropped on receipt.
     blame_generation: u64,
+    highlight_requests: Sender<HighlightRequest>,
+    highlight_ready: Receiver<HighlightResult>,
+    /// Generation guard for highlighting, same role as `blame_generation`.
+    highlight_generation: u64,
 }
 
 impl Engine {
@@ -132,6 +136,13 @@ impl Engine {
             let _ = hint_tx.send(initial_playhead);
         }
 
+        // The highlight worker needs no repo — it works on snapshot content
+        // alone — so it's spawned unconditionally (highlighting is useful even
+        // with trivial history).
+        let (hl_req_tx, hl_req_rx) = mpsc::channel();
+        let (hl_ready_tx, hl_ready_rx) = mpsc::channel();
+        thread::spawn(move || syntax::run(hl_req_rx, hl_ready_tx));
+
         Engine {
             repo,
             cache: SnapshotCache::new(SNAPSHOT_CACHE_CAPACITY),
@@ -140,7 +151,23 @@ impl Engine {
             blame_requests: blame_req_tx,
             blame_ready: blame_ready_rx,
             blame_generation: 0,
+            highlight_requests: hl_req_tx,
+            highlight_ready: hl_ready_rx,
+            highlight_generation: 0,
         }
+    }
+
+    /// Request highlighting of the current snapshot, bumping the generation so a
+    /// result for the old position is dropped on receipt. A no-op payload (an
+    /// absent file) still bumps the generation so stale colors can't reappear.
+    fn request_highlight(&mut self, state: &AppState) {
+        self.highlight_generation += 1;
+        let _ = self.highlight_requests.send(HighlightRequest {
+            generation: self.highlight_generation,
+            content: state.current.content.clone(),
+            path: state.file_path.clone(),
+            theme: state.theme,
+        });
     }
 
     /// Resolve one commit-step of scrubbing in the given direction.
@@ -182,6 +209,9 @@ impl Engine {
         };
 
         app::set_playhead(state, next, snapshot, ghosts, direction);
+        // Show plain text immediately; the async worker colorizes a beat later.
+        app::set_highlighted(state, None);
+        self.request_highlight(state);
         let _ = self.hints.send(next);
         if state.blame_visible {
             self.request_blame(state);
@@ -221,12 +251,23 @@ impl Engine {
             }
         }
     }
+
+    /// Apply a completed highlight result if it's still current; drop stale ones.
+    /// Never blocks.
+    fn drain_highlight(&mut self, state: &mut AppState) {
+        while let Ok(result) = self.highlight_ready.try_recv() {
+            if result.generation == self.highlight_generation {
+                app::set_highlighted(state, result.highlighted);
+            }
+        }
+    }
 }
 
 fn run(terminal: &mut DefaultTerminal, engine: &mut Engine, mut state: AppState) -> Result<()> {
     while !state.should_quit {
         engine.drain_prefetched();
         engine.drain_blame(&mut state);
+        engine.drain_highlight(&mut state);
         app::ease_scroll(&mut state);
 
         terminal

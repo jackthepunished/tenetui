@@ -68,6 +68,26 @@ pub struct Theme {
     pub depth: ColorDepth,
 }
 
+/// Token categories for syntax highlighting. The mapping from `syntect` scopes
+/// to these classes lives in `syntax.rs`; the *colors* for each live here, so
+/// the palette stays in one module (see docs/decisions.md "Visual identity").
+///
+/// Every color below is deliberately low-chroma and cold — **never** a
+/// saturated red or blue, since those two hues are reserved for time-direction
+/// (forward/inverted) and the ghost trails. Syntax reads as quiet structure;
+/// the pincer and the comet trail stay the only vivid things on screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SyntaxClass {
+    Text,
+    Comment,
+    Keyword,
+    StringLit,
+    Constant,
+    Type,
+    Function,
+    Operator,
+}
+
 // --- Anchor colors (sRGB u8), the only literals in the app -------------------
 
 /// Cold neutral base — quiet steel-grey, the resting color of everything.
@@ -80,6 +100,32 @@ const RED: Rgb = Rgb(255, 90, 77);
 const BLUE: Rgb = Rgb(77, 158, 255);
 /// The white-hot playhead pivot.
 const PIVOT: Rgb = Rgb(245, 247, 255);
+
+/// Muted syntax palette — cold, low-chroma, no saturated red/blue.
+const SYNTAX_TEXT: Rgb = Rgb(182, 190, 202);
+const SYNTAX_COMMENT: Rgb = Rgb(102, 112, 124);
+const SYNTAX_KEYWORD: Rgb = Rgb(158, 144, 176);
+const SYNTAX_STRING: Rgb = Rgb(170, 162, 130);
+const SYNTAX_CONSTANT: Rgb = Rgb(178, 152, 140);
+const SYNTAX_TYPE: Rgb = Rgb(150, 172, 158);
+const SYNTAX_FUNCTION: Rgb = Rgb(158, 174, 186);
+const SYNTAX_OPERATOR: Rgb = Rgb(140, 148, 160);
+
+/// The muted sRGB for a syntax class, for building the highlighter's color
+/// table. Kept here so every color literal stays in this one module.
+pub fn syntax_rgb(class: SyntaxClass) -> (u8, u8, u8) {
+    let Rgb(r, g, b) = match class {
+        SyntaxClass::Text => SYNTAX_TEXT,
+        SyntaxClass::Comment => SYNTAX_COMMENT,
+        SyntaxClass::Keyword => SYNTAX_KEYWORD,
+        SyntaxClass::StringLit => SYNTAX_STRING,
+        SyntaxClass::Constant => SYNTAX_CONSTANT,
+        SyntaxClass::Type => SYNTAX_TYPE,
+        SyntaxClass::Function => SYNTAX_FUNCTION,
+        SyntaxClass::Operator => SYNTAX_OPERATOR,
+    };
+    (r, g, b)
+}
 
 impl Theme {
     pub fn new() -> Self {
@@ -139,6 +185,13 @@ impl Theme {
         };
         // decay 1.0 → full glow, 0.0 → base steel foreground.
         self.quantize(oklab_lerp(STEEL, glow, decay.clamp(0.0, 1.0)))
+    }
+
+    /// Quantize an arbitrary sRGB triple to the terminal capability. The
+    /// highlighter uses this to route `syntect`'s resolved token colors through
+    /// the same truecolor→256→16 fallback as every other color in the app.
+    pub fn rgb(&self, r: u8, g: u8, b: u8) -> Color {
+        self.quantize(Rgb(r, g, b))
     }
 
     /// Quantize an sRGB triple to the detected terminal capability.

@@ -6,6 +6,7 @@
 use crate::diff;
 use crate::input::Action;
 use crate::repo::{BlameLine, CommitMeta, Snapshot};
+use crate::syntax::Highlighted;
 use crate::theme::Theme;
 use std::collections::HashMap;
 
@@ -49,6 +50,10 @@ pub struct AppState {
     /// Where `scroll` is easing toward — set by a transition's changed region,
     /// or snapped to `scroll` itself by manual scrolling. See [`ease_scroll`].
     pub scroll_target: u16,
+    /// Syntax highlighting for `current`, one entry per line, or `None` when the
+    /// file type is unknown or the snapshot doesn't exist. Recomputed off the
+    /// render path whenever the playhead moves (see `main`'s `jump_to`).
+    pub highlighted: Option<Highlighted>,
     /// Whether the blame gutter is toggled on.
     pub blame_visible: bool,
     /// Author + age per line at `playhead`, once the background blame worker
@@ -81,6 +86,7 @@ impl AppState {
             speed_ms: DEFAULT_TICK_MS,
             scroll: 0,
             scroll_target: 0,
+            highlighted: None,
             blame_visible: false,
             blame: None,
             search: None,
@@ -185,6 +191,13 @@ pub fn set_playhead(
 /// matches the latest request before calling this.
 pub fn set_blame(state: &mut AppState, lines: Vec<BlameLine>) {
     state.blame = Some(lines);
+}
+
+/// Replace the current snapshot's syntax highlighting. Computed by the caller
+/// (`main`) since it needs the `Highlighter`; kept out of `set_playhead` so the
+/// two are independently testable and highlighting can be swapped/disabled.
+pub fn set_highlighted(state: &mut AppState, highlighted: Option<Highlighted>) {
+    state.highlighted = highlighted;
 }
 
 /// Enter `/`-search mode with an empty query.

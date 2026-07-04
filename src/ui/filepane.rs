@@ -1,6 +1,7 @@
 //! The main pane: the file exactly as it existed at the playhead, with a
-//! line-number gutter, an optional blame gutter, and directional ghost
-//! highlighting on changed lines. Syntax highlighting arrives in M4.
+//! line-number gutter, an optional blame gutter, syntax highlighting, and
+//! directional ghost highlighting on changed lines (which overrides syntax
+//! color, since the comet trail must read as red/blue).
 
 use crate::app::{AppState, Direction};
 use crate::diff::GHOST_MAX_DECAY;
@@ -71,7 +72,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
                 None => fg,
             };
 
-            let mut spans = Vec::with_capacity(3);
+            let mut spans = Vec::new();
             if state.blame_visible {
                 // Blank cells while the async result hasn't arrived yet (or a
                 // line past what was blamed) rather than blocking the render.
@@ -91,7 +92,21 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
                 format!("{:>width$} ", i + 1, width = width),
                 gutter,
             ));
-            spans.push(Span::styled(text.to_string(), text_style));
+
+            // A ghosting line glows in one direction color, overriding syntax —
+            // the comet trail must read as red/blue. Otherwise use syntax colors
+            // if we have them, else the plain foreground.
+            match (
+                state.ghosts.contains_key(&i),
+                state.highlighted.as_ref().and_then(|h| h.get(i)),
+            ) {
+                (false, Some(runs)) if !runs.is_empty() => {
+                    for (piece, color) in runs {
+                        spans.push(Span::styled(piece.clone(), Style::default().fg(*color)));
+                    }
+                }
+                _ => spans.push(Span::styled(text.to_string(), text_style)),
+            }
             Line::from(spans)
         })
         .collect();
@@ -253,5 +268,53 @@ mod tests {
         // the ghost tests above — i.e. no blame prefix consumes those columns.
         let row0 = row_text(&state, 0);
         assert!(row0.trim_start().starts_with("1 one"));
+    }
+
+    #[test]
+    fn syntax_colors_apply_to_unghosted_lines() {
+        let mut state = state_with_ghost(Direction::Forward, 0);
+        state.ghosts.clear();
+        // Two style runs on line 0 ("one") in distinct non-foreground colors.
+        let a = Color::Rgb(200, 100, 50);
+        let b = Color::Rgb(50, 200, 100);
+        state.highlighted = Some(vec![
+            vec![("on".to_string(), a), ("e".to_string(), b)],
+            vec![],
+            vec![],
+        ]);
+
+        let mut terminal = Terminal::new(TestBackend::new(20, 3)).unwrap();
+        terminal
+            .draw(|frame| render(frame, frame.area(), &state))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        // "1 " gutter is 2 cells; "o","n" get color a, "e" gets color b.
+        assert_eq!(buffer[(2, 0)].fg, a);
+        assert_eq!(buffer[(3, 0)].fg, a);
+        assert_eq!(buffer[(4, 0)].fg, b);
+    }
+
+    #[test]
+    fn ghost_glow_overrides_syntax_on_changed_lines() {
+        // Line 1 ("two") is both ghosted and syntax-highlighted; the glow must win.
+        let mut state = state_with_ghost(Direction::Forward, GHOST_MAX_DECAY);
+        let syntax_color = Color::Rgb(10, 20, 30);
+        state.highlighted = Some(vec![
+            vec![],
+            vec![("two".to_string(), syntax_color)],
+            vec![],
+        ]);
+
+        let mut terminal = Terminal::new(TestBackend::new(20, 3)).unwrap();
+        terminal
+            .draw(|frame| render(frame, frame.area(), &state))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let cell = buffer[(2, 1)].fg;
+        assert_ne!(cell, syntax_color, "ghost glow must override syntax color");
+        assert!(
+            matches!(cell, Color::Rgb(r, _, b) if r > b),
+            "forward ghost should read red: {cell:?}"
+        );
     }
 }

@@ -39,10 +39,10 @@ Milestones are ordered; each produces something runnable. Claude Code: tick chec
 
 ## M4 — Polish + release
 
-- [ ] Syntax highlighting (syntect), theme respects terminal colors
+- [x] Syntax highlighting (syntect), theme respects terminal colors
 - [ ] Config file (`~/.config/tenetui/config.toml`): keybinds, speed, cache size
 - [ ] Help overlay (`?`), README with GIF, `cargo install tenetui` published to crates.io
-- [ ] Criterion benches for snapshot + diff hot paths; CI (fmt, clippy -D warnings, test)
+- [ ] Criterion benches for snapshot + diff hot paths; CI (fmt, clippy -D warnings, test) — benches done; CI pending
 
 **Accept:** a stranger can install and use it without reading anything but `?`.
 
