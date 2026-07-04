@@ -92,7 +92,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         ])
     } else {
         Line::from(Span::styled(
-            "h/l scrub · space play · B blame · / search · q quit",
+            "h/l scrub · space play · B blame · / search · ? help",
             Style::default().fg(th.chrome()),
         ))
     };

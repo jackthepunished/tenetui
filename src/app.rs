@@ -63,6 +63,8 @@ pub struct AppState {
     /// `Some(query)` while in `/`-search mode; typed characters build the query
     /// in place. `None` in normal navigation mode.
     pub search: Option<String>,
+    /// Whether the help overlay is showing (modal).
+    pub help_visible: bool,
     pub should_quit: bool,
 }
 
@@ -90,6 +92,7 @@ impl AppState {
             blame_visible: false,
             blame: None,
             search: None,
+            help_visible: false,
             should_quit: false,
         }
     }
@@ -154,6 +157,7 @@ pub fn update(state: &mut AppState, action: Action) {
             }
         }
         Action::SearchStart => search_start(state),
+        Action::ToggleHelp => state.help_visible = !state.help_visible,
     }
 }
 

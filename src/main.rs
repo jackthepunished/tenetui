@@ -7,7 +7,7 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use crossterm::event::{self, Event, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use git2::{Oid, Repository};
 use ratatui::DefaultTerminal;
 use std::path::PathBuf;
@@ -15,15 +15,12 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 use tenetui::app::{self, AppState, Direction};
-use tenetui::input::{self, Action, SearchAction};
+use tenetui::config::Config;
+use tenetui::input::{self, Action, Keymap, SearchAction};
 use tenetui::repo::blame::{BlameRequest, BlameResult};
 use tenetui::repo::{self, SnapshotCache};
 use tenetui::syntax::{HighlightRequest, HighlightResult};
 use tenetui::{diff, syntax, theme, ui};
-
-/// Snapshot cache capacity. Generously larger than the prefetch window (±20)
-/// so ordinary back-and-forth scrubbing stays warm too.
-const SNAPSHOT_CACHE_CAPACITY: usize = 256;
 
 /// Idle poll interval when nothing is playing — just often enough to stay
 /// responsive to terminal resizes.
@@ -69,8 +66,20 @@ fn main() -> Result<()> {
         );
     }
 
-    let state = AppState::new(theme::Theme::new(), rel.clone(), timeline.clone(), current);
-    let mut engine = Engine::spawn(repo, cli.repo.clone(), rel, timeline, state.playhead);
+    let config = Config::load();
+    let mut keymap = Keymap::default();
+    keymap.apply_overrides(&config.keybinds);
+
+    let mut state = AppState::new(theme::Theme::new(), rel.clone(), timeline.clone(), current);
+    state.speed_ms = config.speed_ms();
+    let mut engine = Engine::spawn(
+        repo,
+        cli.repo.clone(),
+        rel,
+        timeline,
+        state.playhead,
+        config.cache_size(),
+    );
 
     // Kick off highlighting of the initial HEAD snapshot; it lands on an early
     // frame (~20ms later) via the async worker rather than blocking startup.
@@ -79,7 +88,7 @@ fn main() -> Result<()> {
     // `ratatui::init` enables raw mode, enters the alternate screen, and installs
     // a panic hook that restores the terminal — so a crash never leaves it broken.
     let mut terminal = ratatui::init();
-    let result = run(&mut terminal, &mut engine, state);
+    let result = run(&mut terminal, &mut engine, &keymap, state);
     ratatui::restore();
     result
 }
@@ -115,6 +124,7 @@ impl Engine {
         file_path: String,
         timeline: Vec<repo::CommitMeta>,
         initial_playhead: usize,
+        cache_size: usize,
     ) -> Self {
         let (hint_tx, hint_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
@@ -145,7 +155,7 @@ impl Engine {
 
         Engine {
             repo,
-            cache: SnapshotCache::new(SNAPSHOT_CACHE_CAPACITY),
+            cache: SnapshotCache::new(cache_size),
             hints: hint_tx,
             ready: ready_rx,
             blame_requests: blame_req_tx,
@@ -263,7 +273,12 @@ impl Engine {
     }
 }
 
-fn run(terminal: &mut DefaultTerminal, engine: &mut Engine, mut state: AppState) -> Result<()> {
+fn run(
+    terminal: &mut DefaultTerminal,
+    engine: &mut Engine,
+    keymap: &Keymap,
+    mut state: AppState,
+) -> Result<()> {
     while !state.should_quit {
         engine.drain_prefetched();
         engine.drain_blame(&mut state);
@@ -271,7 +286,7 @@ fn run(terminal: &mut DefaultTerminal, engine: &mut Engine, mut state: AppState)
         app::ease_scroll(&mut state);
 
         terminal
-            .draw(|frame| ui::draw(frame, &state))
+            .draw(|frame| ui::draw(frame, &state, keymap))
             .context("render failed")?;
 
         // While playing, the poll timeout doubles as the one tick source (see
@@ -289,9 +304,17 @@ fn run(terminal: &mut DefaultTerminal, engine: &mut Engine, mut state: AppState)
             if let Event::Key(key) = event::read()?
                 && key.kind == KeyEventKind::Press
             {
-                if state.search.is_some() {
+                if state.help_visible {
+                    // Modal: only `?` (ToggleHelp) or Esc closes it; the app's
+                    // Esc→quit binding is suppressed while help is up.
+                    if key.code == KeyCode::Esc
+                        || keymap.action_for(key) == Some(Action::ToggleHelp)
+                    {
+                        app::update(&mut state, Action::ToggleHelp);
+                    }
+                } else if state.search.is_some() {
                     handle_search_key(&mut state, engine, key)?;
-                } else if let Some(action) = input::map_key(key) {
+                } else if let Some(action) = keymap.action_for(key) {
                     handle_action(&mut state, engine, action)?;
                 }
             }

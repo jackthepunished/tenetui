@@ -40,8 +40,8 @@ Milestones are ordered; each produces something runnable. Claude Code: tick chec
 ## M4 — Polish + release
 
 - [x] Syntax highlighting (syntect), theme respects terminal colors
-- [ ] Config file (`~/.config/tenetui/config.toml`): keybinds, speed, cache size
-- [ ] Help overlay (`?`), README with GIF, `cargo install tenetui` published to crates.io
+- [x] Config file (`~/.config/tenetui/config.toml`): keybinds, speed, cache size
+- [ ] Help overlay (`?`), README with GIF, `cargo install tenetui` published to crates.io — help overlay done; README/GIF/publish pending
 - [ ] Criterion benches for snapshot + diff hot paths; CI (fmt, clippy -D warnings, test) — benches done; CI pending
 
 **Accept:** a stranger can install and use it without reading anything but `?`.

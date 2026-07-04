@@ -3,18 +3,22 @@
 //! rules in CLAUDE.md). All color comes from `state.theme`.
 
 mod filepane;
+mod help;
 mod statusbar;
 mod timeline;
 
 use crate::app::AppState;
+use crate::input::Keymap;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-/// Top-level frame composition: header · file pane · timeline · status bar.
-pub fn draw(frame: &mut Frame, state: &AppState) {
+/// Top-level frame composition: header · file pane · timeline · status bar, plus
+/// the help overlay on top when toggled. `keymap` is read-only, threaded in only
+/// so the help overlay can render the live (possibly reconfigured) bindings.
+pub fn draw(frame: &mut Frame, state: &AppState, keymap: &Keymap) {
     let chunks = Layout::vertical([
         Constraint::Length(1), // header / wordmark
         Constraint::Min(1),    // file pane
@@ -27,6 +31,10 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
     filepane::render(frame, chunks[1], state);
     timeline::render(frame, chunks[2], state);
     statusbar::render(frame, chunks[3], state);
+
+    if state.help_visible {
+        help::render(frame, frame.area(), state, keymap);
+    }
 }
 
 /// The wordmark (left) and the pincer legend (right), sharing one row.
@@ -92,8 +100,9 @@ mod tests {
             },
         );
 
+        let keymap = Keymap::default();
         let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
-        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        terminal.draw(|frame| draw(frame, &state, &keymap)).unwrap();
 
         let buffer = terminal.backend().buffer();
         let mut text = String::new();

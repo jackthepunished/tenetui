@@ -7,6 +7,7 @@
 //! is centralized in `app`.
 
 pub mod app;
+pub mod config;
 pub mod diff;
 pub mod input;
 pub mod repo;
