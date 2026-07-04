@@ -2,10 +2,12 @@
 //! it never touches a `git2` type. `Repository` is `!Sync`, so each thread that
 //! needs one owns its own handle (see docs/architecture.md "Threading").
 
+pub mod blame;
 pub mod prefetch;
 mod snapshot;
 mod walk;
 
+pub use blame::BlameLine;
 pub use snapshot::{SnapshotCache, head_snapshot};
 pub use walk::timeline;
 
@@ -24,6 +26,10 @@ pub struct CommitMeta {
     pub summary: String,
     pub insertions: usize,
     pub deletions: usize,
+    /// More than one parent — a timeline landmark.
+    pub is_merge: bool,
+    /// Reachable from a tag (lightweight or annotated) — a timeline landmark.
+    pub is_tagged: bool,
 }
 
 impl CommitMeta {
@@ -158,6 +164,8 @@ mod tests {
             summary: "s".into(),
             insertions: 0,
             deletions: 0,
+            is_merge: false,
+            is_tagged: false,
         }
     }
 

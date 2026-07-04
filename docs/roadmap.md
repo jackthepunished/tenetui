@@ -31,9 +31,9 @@ Milestones are ordered; each produces something runnable. Claude Code: tick chec
 
 ## M3 — Blame gutter + navigation
 
-- [ ] Blame gutter (toggle `b`): author + relative age per line, computed async on scrub pause
-- [ ] Jump motions: `w`/`b` by day, `{`/`}` by week, `g`/`G` first/last, `/` fuzzy-search commit messages
-- [ ] Tag and merge markers on the timeline
+- [x] Blame gutter (toggle `B` — see docs/decisions.md for the `b` key collision this resolves): author + relative age per line, computed async on scrub pause
+- [x] Jump motions: `w`/`b` by day, `{`/`}` by week, `g`/`G` first/last, `/` fuzzy-search commit messages
+- [x] Tag and merge markers on the timeline
 
 **Accept:** blame never blocks scrubbing; navigation works on linux.git without stalls.
 

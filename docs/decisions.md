@@ -57,3 +57,27 @@ Append-only. One dated entry per non-trivial technical decision. Format: context
 **Context:** The whitepaper's "Directional ghosting" section says addition vs. deletion should be carried by luminance + a gutter sign, not hue. But the file pane only ever renders the file *as it exists at the playhead* — a deleted line has no position left to anchor a `-` marker to once it's gone from `new`.
 **Decision:** Ship glow + decay (hue = direction, luminance = decay) for M2 without the +/- gutter sign; `diff::compute_ghosts` only marks lines present in the new content. Not a scope cut, silently — flagging it here because there's no obvious single-pane rendering target for a pure deletion yet.
 **Consequences:** Additions and edits glow correctly today. A deletion's *absence* is currently invisible at the deleted position (the surrounding lines simply shift). Revisit alongside M3's blame gutter, which already reserves left-margin space — a transient "− N lines removed here" marker is the likely design, not attempted now.
+
+## 2026-07-05 — Blame gutter toggle moved from `b` to `B`
+
+**Context:** The roadmap's own M3 bullets independently proposed `b` for two different things: "Blame gutter (toggle `b`)" and "Jump motions: `w`/`b` by day" (the latter matching the whitepaper's original `w`/`b` day-jump pairing). Both can't hold the same key.
+**Decision:** Move the blame toggle to `B` (shift), keeping lowercase `b` for jump-backward-a-day so the whitepaper's `w`/`b` motion pairing stays intact. Chosen over the reverse (remapping the jump) because `w`/`b` is an established vim-ism worth preserving verbatim, while blame's key was never load-bearing elsewhere.
+**Consequences:** No functional loss either way; documented in `input.rs`'s module comment and a dedicated test (`blame_toggle_uses_shift_b_not_lowercase_b`) so the collision can't silently reappear if either binding is touched later.
+
+## 2026-07-05 — Blame reuses the prefetch thread's coalescing pattern instead of a debounce timer
+
+**Context:** Architecture calls for blame to be "computed once at the playhead when scrubbing pauses" — a full `git2` blame is too slow to run on every scrub step. The obvious design spawns a request on every move and debounces with an idle timer before actually blaming.
+**Decision:** No debounce timer. The blame worker thread (`repo::blame::run`) blocks for a request, then drains any further queued requests before acting — identical to the prefetch thread's "coalesce to the latest hint" loop from M2. Combined with a generation counter (bumped per request, stamped on results, mismatches dropped on receipt), this means whichever position the user is actually resting on when the worker gets free time is what gets blamed and displayed; positions scrubbed *through* during continuous movement are naturally superseded before their blame ever finishes.
+**Consequences:** One fewer piece of state (no `Instant`/timer bookkeeping in the main loop), and it's the same mental model as prefetch — a second instance of one pattern rather than a new one. `AppState.blame` is set to `None` on every move (invalidated immediately, not left stale) so a fast scrubber never sees blame attributed to the wrong commit, at the cost of a briefly blank gutter while the async result is in flight.
+
+## 2026-07-05 — Fuzzy search is subsequence matching, not scored fuzzy-finding
+
+**Context:** Roadmap M3 asks for "`/` fuzzy-search commit messages." Tools like fzf implement fuzzy matching with match-quality scoring (contiguous runs, word-boundary bonuses, etc.) — a meaningfully bigger feature than commit-message search needs.
+**Decision:** `app::search_target` implements the simplest legitimate definition of "fuzzy": every character of the query appears in order (not necessarily contiguous) in the commit summary, case-insensitive. No scoring; the first match found searching forward from the playhead (wrapping) wins.
+**Consequences:** Good enough for commit-message-length text and trivially testable (`search_target_finds_nearest_fuzzy_match_forward_and_wraps`). A pathological query could match a summary "by accident" (e.g. `"ab"` matching `"a...b"` far apart) with no relevance ranking to fall back on — acceptable at commit-message scale; revisit only if it proves annoying in practice.
+
+## 2026-07-05 — Verification scope: no linux.git in the sandbox
+
+**Context:** M3's accept criterion is "blame never blocks scrubbing; navigation works on linux.git without stalls." linux.git is a multi-GB clone requiring network access this environment doesn't have.
+**Decision:** Verify the architecture-level guarantee instead of the literal repo: blame runs on its own thread behind a channel (the render loop only ever does a non-blocking `try_recv`), so a slow blame computation structurally *cannot* block a frame regardless of repo size. Correctness (author/age attribution, tag/merge detection, jump math, fuzzy search) is covered by unit tests against small synthetic repos built with real `git2` commits, and the full binary was smoke-tested headlessly against a small real repo with a tag and multiple authors.
+**Consequences:** The scaling claim ("works on linux.git without stalls") is architecturally sound but not empirically measured in this environment. Flagging this rather than claiming a validation that didn't happen; worth an actual large-repo run before the M4 release milestone.

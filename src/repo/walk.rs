@@ -3,6 +3,7 @@
 use super::CommitMeta;
 use anyhow::Result;
 use git2::{DiffOptions, Oid, Repository, Tree};
+use std::collections::HashSet;
 use std::path::Path;
 
 /// Walk history for `path` (repo-relative, forward slashes) and return the
@@ -11,6 +12,8 @@ use std::path::Path;
 /// A commit "touched" the file when the file's blob oid differs from its first
 /// parent's (added, modified, or deleted). Churn is a diff limited to that path.
 pub fn timeline(repo: &Repository, path: &str) -> Result<Vec<CommitMeta>> {
+    let tagged = tagged_commit_oids(repo)?;
+
     let mut revwalk = repo.revwalk()?;
     revwalk.push_head()?;
     // TOPOLOGICAL guarantees a child never precedes its parent even when commit
@@ -49,12 +52,29 @@ pub fn timeline(repo: &Repository, path: &str) -> Result<Vec<CommitMeta>> {
             summary: commit.summary().unwrap_or("").to_string(),
             insertions,
             deletions,
+            is_merge: commit.parent_count() > 1,
+            is_tagged: tagged.contains(&oid),
         });
     }
 
     // revwalk TIME order is newest-first; the timeline reads past → future.
     out.reverse();
     Ok(out)
+}
+
+/// Every commit reachable through a tag, lightweight or annotated (peeled down
+/// to the commit itself) — used to mark timeline landmarks.
+fn tagged_commit_oids(repo: &Repository) -> Result<HashSet<Oid>> {
+    let mut set = HashSet::new();
+    repo.tag_foreach(|oid, _name| {
+        if let Ok(obj) = repo.find_object(oid, None)
+            && let Ok(commit) = obj.peel_to_commit()
+        {
+            set.insert(commit.id());
+        }
+        true
+    })?;
+    Ok(set)
 }
 
 /// The blob oid for `path` in `tree`, or `None` if the file isn't present.
@@ -147,5 +167,56 @@ mod tests {
         let missing = head_snapshot(&repo, "nope.txt").unwrap();
         assert!(!missing.existed);
         assert_eq!(missing.line_count(), 0);
+    }
+
+    /// Merge commits (>1 parent) and tagged commits should be flagged for the
+    /// timeline's landmark markers — build a small diamond history and a tag by
+    /// hand rather than through the linear-only `commit` helper above.
+    #[test]
+    fn merge_and_tag_commits_are_flagged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let repo = Repository::init(dir).unwrap();
+        let sig = Signature::now("Test", "test@example.com").unwrap();
+
+        let write_commit = |parents: &[&git2::Commit], msg: &str| -> git2::Oid {
+            let mut index = repo.index().unwrap();
+            index
+                .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+                .unwrap();
+            index.write().unwrap();
+            let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+            repo.commit(None, &sig, &sig, msg, &tree, parents).unwrap()
+        };
+
+        write(dir, "foo.txt", "a\n");
+        let root_oid = write_commit(&[], "root");
+        let root = repo.find_commit(root_oid).unwrap();
+        repo.reference("refs/heads/master", root_oid, true, "init")
+            .unwrap();
+
+        write(dir, "foo.txt", "a\nb\n");
+        let side_oid = write_commit(&[&root], "side branch edits foo");
+        let side = repo.find_commit(side_oid).unwrap();
+
+        // A lightweight tag on the side commit — should resolve straight to it.
+        repo.tag_lightweight("v-side", side.as_object(), false)
+            .unwrap();
+
+        write(dir, "foo.txt", "a\nb\nc\n");
+        let merge_oid = write_commit(&[&root, &side], "merge side into root");
+        repo.reference("refs/heads/master", merge_oid, true, "merge")
+            .unwrap();
+        repo.set_head("refs/heads/master").unwrap();
+        repo.checkout_head(None).unwrap();
+
+        let tl = timeline(&repo, "foo.txt").unwrap();
+        let by_summary = |s: &str| tl.iter().find(|c| c.summary == s).unwrap();
+
+        assert!(!by_summary("root").is_merge);
+        assert!(by_summary("side branch edits foo").is_tagged);
+        assert!(!by_summary("side branch edits foo").is_merge);
+        assert!(by_summary("merge side into root").is_merge);
+        assert!(!by_summary("merge side into root").is_tagged);
     }
 }

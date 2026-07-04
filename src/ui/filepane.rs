@@ -1,15 +1,29 @@
 //! The main pane: the file exactly as it existed at the playhead, with a
-//! line-number gutter and directional ghost highlighting on changed lines.
-//! The blame gutter arrives in M3; syntax highlighting in M4.
+//! line-number gutter, an optional blame gutter, and directional ghost
+//! highlighting on changed lines. Syntax highlighting arrives in M4.
 
 use crate::app::{AppState, Direction};
 use crate::diff::GHOST_MAX_DECAY;
+use crate::repo::blame::format_age;
 use crate::theme::Pole;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
+
+const BLAME_AUTHOR_WIDTH: usize = 10;
+const BLAME_AGE_WIDTH: usize = 4;
+
+/// Truncate to `max` chars, marking the cut with an ellipsis so the gutter
+/// never grows past a fixed width regardless of author name length.
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        s.chars().take(max.saturating_sub(1)).collect::<String>() + "…"
+    }
+}
 
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     let th = &state.theme;
@@ -56,10 +70,29 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
                 }
                 None => fg,
             };
-            Line::from(vec![
-                Span::styled(format!("{:>width$} ", i + 1, width = width), gutter),
-                Span::styled(text.to_string(), text_style),
-            ])
+
+            let mut spans = Vec::with_capacity(3);
+            if state.blame_visible {
+                // Blank cells while the async result hasn't arrived yet (or a
+                // line past what was blamed) rather than blocking the render.
+                let (author, age) = match state.blame.as_ref().and_then(|b| b.get(i)) {
+                    Some(line) => (
+                        truncate(&line.author, BLAME_AUTHOR_WIDTH),
+                        format_age(line.age_days),
+                    ),
+                    None => (String::new(), String::new()),
+                };
+                spans.push(Span::styled(
+                    format!("{author:<BLAME_AUTHOR_WIDTH$} {age:>BLAME_AGE_WIDTH$} │ "),
+                    gutter,
+                ));
+            }
+            spans.push(Span::styled(
+                format!("{:>width$} ", i + 1, width = width),
+                gutter,
+            ));
+            spans.push(Span::styled(text.to_string(), text_style));
+            Line::from(spans)
         })
         .collect();
 
@@ -93,6 +126,8 @@ mod tests {
                 summary: "s".into(),
                 insertions: 1,
                 deletions: 0,
+                is_merge: false,
+                is_tagged: false,
             }],
             Snapshot {
                 oid: Oid::zero(),
@@ -155,5 +190,68 @@ mod tests {
             nearly_faded_fg, base_fg,
             "even the last decay step should still be visibly tinted"
         );
+    }
+
+    /// Render a row into a plain string of symbols, for substring assertions.
+    fn row_text(state: &AppState, row: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(40, 3)).unwrap();
+        terminal
+            .draw(|frame| render(frame, frame.area(), state))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..40)
+            .map(|x| buffer[(x, row)].symbol().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn blame_gutter_shows_author_and_age_when_visible_and_ready() {
+        use crate::repo::BlameLine;
+
+        let mut state = state_with_ghost(Direction::Forward, 0);
+        state.blame_visible = true;
+        state.blame = Some(vec![
+            BlameLine {
+                author: "Alice".into(),
+                age_days: 3,
+            },
+            BlameLine {
+                author: "Bob".into(),
+                age_days: 400,
+            },
+            BlameLine {
+                author: "Alice".into(),
+                age_days: 3,
+            },
+        ]);
+
+        let row0 = row_text(&state, 0);
+        assert!(row0.contains("Alice"), "{row0:?}");
+        assert!(row0.contains("3d"), "{row0:?}");
+
+        let row1 = row_text(&state, 1);
+        assert!(row1.contains("Bob"), "{row1:?}");
+        assert!(row1.contains("1y"), "{row1:?}");
+    }
+
+    #[test]
+    fn blame_gutter_is_blank_but_present_before_results_arrive() {
+        let mut state = state_with_ghost(Direction::Forward, 0);
+        state.blame_visible = true;
+        state.blame = None; // async result hasn't landed yet
+
+        // Must not panic and must not show stale/garbage author text.
+        let row0 = row_text(&state, 0);
+        assert!(!row0.contains("Alice"));
+    }
+
+    #[test]
+    fn blame_gutter_is_absent_when_toggled_off() {
+        let state = state_with_ghost(Direction::Forward, 0);
+        assert!(!state.blame_visible);
+        // With the gutter off, the text column starts right after "N " as in
+        // the ghost tests above — i.e. no blame prefix consumes those columns.
+        let row0 = row_text(&state, 0);
+        assert!(row0.trim_start().starts_with("1 one"));
     }
 }

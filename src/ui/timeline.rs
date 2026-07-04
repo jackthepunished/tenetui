@@ -3,6 +3,12 @@
 //! the playhead. Block height encodes churn magnitude, hue encodes direction.
 //! Scrubbing (`h`/`l`, wired in `main::scrub`) moves `state.playhead`, which
 //! sweeps this red/blue boundary along the bar.
+//!
+//! Tag and merge commits are landmarks, not churn data — a tagged bucket
+//! overrides its glyph/color entirely (a white "▲", unmissable regardless of
+//! position); a merge bucket keeps its normal direction color but swaps in a
+//! "◆" so merge points are identifiable at a glance. Tag takes priority when a
+//! bucket contains both (rare, and tags are the rarer, more significant event).
 
 use crate::app::AppState;
 use crate::theme::Pole;
@@ -75,11 +81,24 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
             Pole::Future
         };
 
-        let glyph = BLOCKS[((intensity * 7.0).round() as usize).min(7)];
-        spans.push(Span::styled(
-            glyph.to_string(),
-            Style::default().fg(th.timeline_cell(pole, intensity)),
-        ));
+        let bucket = &state.timeline[lo..hi];
+        if bucket.iter().any(|c| c.is_tagged) {
+            spans.push(Span::styled(
+                "▲",
+                Style::default().fg(th.timeline_cell(Pole::Pivot, 1.0)),
+            ));
+        } else if bucket.iter().any(|c| c.is_merge) {
+            spans.push(Span::styled(
+                "◆",
+                Style::default().fg(th.timeline_cell(pole, intensity)),
+            ));
+        } else {
+            let glyph = BLOCKS[((intensity * 7.0).round() as usize).min(7)];
+            spans.push(Span::styled(
+                glyph.to_string(),
+                Style::default().fg(th.timeline_cell(pole, intensity)),
+            ));
+        }
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -104,6 +123,8 @@ mod tests {
             summary: "s".into(),
             insertions: 1,
             deletions: 0,
+            is_merge: false,
+            is_tagged: false,
         }
     }
 
@@ -161,5 +182,48 @@ mod tests {
             "column should flip red->blue once the playhead passes it"
         );
         assert!(is_red_dominant(at_7[9]), "still ahead of playhead 7");
+    }
+
+    /// Same 1-row-per-commit trick, but pulling glyphs instead of colors, to
+    /// verify tag/merge landmarks render as their distinct markers rather than
+    /// a churn-height block.
+    fn render_symbols(state: &AppState, width: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+        terminal
+            .draw(|frame| render(frame, frame.area(), state))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..width)
+            .map(|x| buffer[(x, 0)].symbol().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn tag_and_merge_commits_render_as_distinct_landmarks() {
+        let mut timeline: Vec<_> = (0..10).map(|_| meta()).collect();
+        timeline[3].is_tagged = true;
+        timeline[6].is_merge = true;
+
+        let mut state = AppState::new(
+            Theme {
+                depth: ColorDepth::TrueColor,
+            },
+            "f.txt".into(),
+            timeline,
+            Snapshot {
+                oid: Oid::zero(),
+                content: "x\n".into(),
+                existed: true,
+            },
+        );
+        state.playhead = 0; // keep the pivot off of columns 3/6 so it can't mask them
+
+        let symbols = render_symbols(&state, 10);
+        assert_eq!(symbols[3], "▲", "tagged commit should show the tag marker");
+        assert_eq!(symbols[6], "◆", "merge commit should show the merge marker");
+        assert!(
+            !BLOCKS.iter().any(|&b| symbols[3] == b.to_string()),
+            "tag marker must not be a churn block"
+        );
     }
 }

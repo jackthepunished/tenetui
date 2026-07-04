@@ -16,9 +16,10 @@ use app::{AppState, Direction};
 use clap::Parser;
 use crossterm::event::{self, Event, KeyEventKind};
 use git2::{Oid, Repository};
-use input::Action;
+use input::{Action, SearchAction};
 use ratatui::DefaultTerminal;
 use repo::SnapshotCache;
+use repo::blame::{BlameRequest, BlameResult};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -31,6 +32,9 @@ const SNAPSHOT_CACHE_CAPACITY: usize = 256;
 /// Idle poll interval when nothing is playing — just often enough to stay
 /// responsive to terminal resizes.
 const IDLE_POLL: Duration = Duration::from_millis(250);
+
+const ONE_DAY_SECS: i64 = 86_400;
+const ONE_WEEK_SECS: i64 = 7 * ONE_DAY_SECS;
 
 #[derive(Parser)]
 #[command(
@@ -80,22 +84,27 @@ fn main() -> Result<()> {
     result
 }
 
-/// The scrub/playback machinery the event loop drives: the main thread's own
-/// `Repository` handle plus cache for on-demand fetches, and the two ends of
-/// the channel pair talking to the background prefetch thread (see
-/// `repo::prefetch` and docs/architecture.md "Threading"). Bundled together so
-/// `run`'s signature doesn't grow a parameter per concern.
+/// The scrub/playback/blame machinery the event loop drives: the main thread's
+/// own `Repository` handle plus cache for on-demand fetches, and the channel
+/// pairs talking to the two background threads (prefetch, blame — see
+/// `repo::prefetch`, `repo::blame`, and docs/architecture.md "Threading").
+/// Bundled together so `run`'s signature doesn't grow a parameter per concern.
 struct Engine {
     repo: Repository,
     cache: SnapshotCache,
     hints: Sender<usize>,
     ready: Receiver<(Oid, repo::Snapshot)>,
+    blame_requests: Sender<BlameRequest>,
+    blame_ready: Receiver<BlameResult>,
+    /// Bumped on every request sent; a result whose generation doesn't match
+    /// this was superseded by a later move and is dropped on receipt.
+    blame_generation: u64,
 }
 
 impl Engine {
-    /// Open the cache, spawn the prefetch thread (given its own path so it can
-    /// open an independent `Repository` — never the one `repo` here), and warm
-    /// the window around `initial_playhead` immediately.
+    /// Open the cache, spawn the prefetch and blame threads (each given its own
+    /// path so it can open an independent `Repository` — never the one `repo`
+    /// here), and warm the snapshot window around `initial_playhead` immediately.
     fn spawn(
         repo: Repository,
         repo_path: PathBuf,
@@ -105,11 +114,20 @@ impl Engine {
     ) -> Self {
         let (hint_tx, hint_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
+        let (blame_req_tx, blame_req_rx) = mpsc::channel();
+        let (blame_ready_tx, blame_ready_rx) = mpsc::channel();
 
         if !timeline.is_empty() {
             let oids: Vec<Oid> = timeline.iter().map(|c| c.oid).collect();
+            {
+                let repo_path = repo_path.clone();
+                let file_path = file_path.clone();
+                thread::spawn(move || {
+                    repo::prefetch::run(repo_path, file_path, oids, hint_rx, ready_tx)
+                });
+            }
             thread::spawn(move || {
-                repo::prefetch::run(repo_path, file_path, oids, hint_rx, ready_tx)
+                repo::blame::run(repo_path, file_path, blame_req_rx, blame_ready_tx)
             });
             let _ = hint_tx.send(initial_playhead);
         }
@@ -119,16 +137,13 @@ impl Engine {
             cache: SnapshotCache::new(SNAPSHOT_CACHE_CAPACITY),
             hints: hint_tx,
             ready: ready_rx,
+            blame_requests: blame_req_tx,
+            blame_ready: blame_ready_rx,
+            blame_generation: 0,
         }
     }
 
-    /// Resolve one commit-step of scrubbing: pick the neighboring playhead
-    /// index, fetch its snapshot (cache hit or a git2 tree lookup), diff it
-    /// against the outgoing snapshot for ghosting, then hand the result to
-    /// `app::set_playhead` as a plain assignment. This — and [`Self::drain_prefetched`]
-    /// — are the only places the event loop talks to git2; `app`/`ui` never do.
-    /// Returns whether the playhead actually moved (used to auto-pause playback
-    /// at either end of history).
+    /// Resolve one commit-step of scrubbing in the given direction.
     fn scrub(&mut self, state: &mut AppState, forward: bool) -> Result<bool> {
         let len = state.timeline.len();
         if len == 0 {
@@ -139,10 +154,23 @@ impl Engine {
         } else {
             state.playhead.saturating_sub(1)
         };
-        if next == state.playhead {
+        self.jump_to(state, next)
+    }
+
+    /// Move the playhead directly to `next` (used by scrub, `g`/`G`, day/week
+    /// jumps, and search) — fetch its snapshot (cache hit or a git2 tree
+    /// lookup), diff against the outgoing snapshot for ghosting, hand the
+    /// result to `app::set_playhead`, then re-arm the prefetch hint and (if the
+    /// gutter is visible) request fresh blame. This and [`Self::drain_prefetched`]/
+    /// [`Self::drain_blame`] are the only places the event loop talks to git2;
+    /// `app`/`ui` never do. Returns whether the playhead actually moved (used to
+    /// auto-pause playback at either end of history).
+    fn jump_to(&mut self, state: &mut AppState, next: usize) -> Result<bool> {
+        if state.timeline.is_empty() || next == state.playhead {
             return Ok(false);
         }
 
+        let forward = next > state.playhead;
         let oid = state.timeline[next].oid;
         let old_content = state.current.content.clone();
         let snapshot = self.cache.get_or_fetch(&self.repo, oid, &state.file_path)?;
@@ -155,14 +183,42 @@ impl Engine {
 
         app::set_playhead(state, next, snapshot, ghosts, direction);
         let _ = self.hints.send(next);
+        if state.blame_visible {
+            self.request_blame(state);
+        }
         Ok(true)
     }
 
-    /// Merge any snapshots the background thread has finished materializing
-    /// since we last checked. Never blocks.
+    /// Send a fresh blame request for the current playhead, bumping the
+    /// generation so any result still in flight for the old position is
+    /// discarded on arrival instead of overwriting newer data.
+    fn request_blame(&mut self, state: &AppState) {
+        let Some(commit) = state.current_commit() else {
+            return;
+        };
+        self.blame_generation += 1;
+        let _ = self.blame_requests.send(BlameRequest {
+            generation: self.blame_generation,
+            oid: commit.oid,
+            line_count: state.current.line_count(),
+        });
+    }
+
+    /// Merge any snapshots the background prefetch thread has finished
+    /// materializing since we last checked. Never blocks.
     fn drain_prefetched(&mut self) {
         while let Ok((oid, snapshot)) = self.ready.try_recv() {
             self.cache.insert(oid, snapshot);
+        }
+    }
+
+    /// Apply a completed blame result if it's still current; drop it silently
+    /// otherwise (a later move already superseded it). Never blocks.
+    fn drain_blame(&mut self, state: &mut AppState) {
+        while let Ok(result) = self.blame_ready.try_recv() {
+            if result.generation == self.blame_generation {
+                app::set_blame(state, result.lines);
+            }
         }
     }
 }
@@ -170,6 +226,7 @@ impl Engine {
 fn run(terminal: &mut DefaultTerminal, engine: &mut Engine, mut state: AppState) -> Result<()> {
     while !state.should_quit {
         engine.drain_prefetched();
+        engine.drain_blame(&mut state);
         app::ease_scroll(&mut state);
 
         terminal
@@ -190,16 +247,11 @@ fn run(terminal: &mut DefaultTerminal, engine: &mut Engine, mut state: AppState)
             // Windows, which would otherwise double-fire every binding.
             if let Event::Key(key) = event::read()?
                 && key.kind == KeyEventKind::Press
-                && let Some(action) = input::map_key(key)
             {
-                match action {
-                    Action::ScrubForward => {
-                        engine.scrub(&mut state, true)?;
-                    }
-                    Action::ScrubBackward => {
-                        engine.scrub(&mut state, false)?;
-                    }
-                    other => app::update(&mut state, other),
+                if state.search.is_some() {
+                    handle_search_key(&mut state, engine, key)?;
+                } else if let Some(action) = input::map_key(key) {
+                    handle_action(&mut state, engine, action)?;
                 }
             }
         } else if state.playing {
@@ -209,6 +261,70 @@ fn run(terminal: &mut DefaultTerminal, engine: &mut Engine, mut state: AppState)
                 // Ran off the end (or start) of history — nothing left to play.
                 state.playing = false;
             }
+        }
+    }
+    Ok(())
+}
+
+fn handle_action(state: &mut AppState, engine: &mut Engine, action: Action) -> Result<()> {
+    match action {
+        Action::ScrubForward => {
+            engine.scrub(state, true)?;
+        }
+        Action::ScrubBackward => {
+            engine.scrub(state, false)?;
+        }
+        Action::JumpDayForward => {
+            let target = app::jump_target(state, true, ONE_DAY_SECS);
+            engine.jump_to(state, target)?;
+        }
+        Action::JumpDayBackward => {
+            let target = app::jump_target(state, false, ONE_DAY_SECS);
+            engine.jump_to(state, target)?;
+        }
+        Action::JumpWeekForward => {
+            let target = app::jump_target(state, true, ONE_WEEK_SECS);
+            engine.jump_to(state, target)?;
+        }
+        Action::JumpWeekBackward => {
+            let target = app::jump_target(state, false, ONE_WEEK_SECS);
+            engine.jump_to(state, target)?;
+        }
+        Action::JumpFirst => {
+            engine.jump_to(state, 0)?;
+        }
+        Action::JumpLast => {
+            let last = state.timeline.len().saturating_sub(1);
+            engine.jump_to(state, last)?;
+        }
+        Action::ToggleBlame => {
+            app::update(state, action);
+            if state.blame_visible {
+                engine.request_blame(state);
+            }
+        }
+        other => app::update(state, other),
+    }
+    Ok(())
+}
+
+fn handle_search_key(
+    state: &mut AppState,
+    engine: &mut Engine,
+    key: event::KeyEvent,
+) -> Result<()> {
+    let Some(search_action) = input::map_search_key(key) else {
+        return Ok(());
+    };
+    match search_action {
+        SearchAction::Type(c) => app::search_type(state, c),
+        SearchAction::Backspace => app::search_backspace(state),
+        SearchAction::Cancel => app::search_cancel(state),
+        SearchAction::Confirm => {
+            if let Some(target) = app::search_target(state) {
+                engine.jump_to(state, target)?;
+            }
+            app::search_cancel(state);
         }
     }
     Ok(())

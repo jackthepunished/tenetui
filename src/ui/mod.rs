@@ -70,6 +70,8 @@ mod tests {
             summary: summary.into(),
             insertions: 3,
             deletions: 1,
+            is_merge: false,
+            is_tagged: false,
         }
     }
 

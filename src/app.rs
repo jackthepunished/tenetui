@@ -5,7 +5,7 @@
 
 use crate::diff;
 use crate::input::Action;
-use crate::repo::{CommitMeta, Snapshot};
+use crate::repo::{BlameLine, CommitMeta, Snapshot};
 use crate::theme::Theme;
 use std::collections::HashMap;
 
@@ -49,6 +49,15 @@ pub struct AppState {
     /// Where `scroll` is easing toward — set by a transition's changed region,
     /// or snapped to `scroll` itself by manual scrolling. See [`ease_scroll`].
     pub scroll_target: u16,
+    /// Whether the blame gutter is toggled on.
+    pub blame_visible: bool,
+    /// Author + age per line at `playhead`, once the background blame worker
+    /// delivers it. `None` while hidden, still computing, or just invalidated
+    /// by a move (see docs/architecture.md "Blame": invalidated on move).
+    pub blame: Option<Vec<BlameLine>>,
+    /// `Some(query)` while in `/`-search mode; typed characters build the query
+    /// in place. `None` in normal navigation mode.
+    pub search: Option<String>,
     pub should_quit: bool,
 }
 
@@ -72,6 +81,9 @@ impl AppState {
             speed_ms: DEFAULT_TICK_MS,
             scroll: 0,
             scroll_target: 0,
+            blame_visible: false,
+            blame: None,
+            search: None,
             should_quit: false,
         }
     }
@@ -111,7 +123,17 @@ pub fn update(state: &mut AppState, action: Action) {
             state.scroll = state.max_scroll();
             state.scroll_target = state.scroll;
         }
-        Action::ScrubBackward | Action::ScrubForward => {}
+        // Handled by the caller instead — see the ScrubForward/ScrubBackward doc
+        // comment above; the same reasoning applies to every jump/blame variant
+        // below that needs a git2 fetch (jumps) or a channel send (blame).
+        Action::ScrubBackward
+        | Action::ScrubForward
+        | Action::JumpDayForward
+        | Action::JumpDayBackward
+        | Action::JumpWeekForward
+        | Action::JumpWeekBackward
+        | Action::JumpFirst
+        | Action::JumpLast => {}
         Action::TogglePlayback => state.playing = !state.playing,
         Action::SpeedUp => {
             state.speed_ms = ((state.speed_ms as f32 * 0.75) as u64).max(MIN_TICK_MS);
@@ -119,6 +141,13 @@ pub fn update(state: &mut AppState, action: Action) {
         Action::SpeedDown => {
             state.speed_ms = ((state.speed_ms as f32 * 1.34) as u64).min(MAX_TICK_MS);
         }
+        Action::ToggleBlame => {
+            state.blame_visible = !state.blame_visible;
+            if !state.blame_visible {
+                state.blame = None;
+            }
+        }
+        Action::SearchStart => search_start(state),
     }
 }
 
@@ -140,12 +169,96 @@ pub fn set_playhead(
     state.playhead = index;
     state.current = snapshot;
     state.direction = direction;
+    // Invalidated on move: the old blame describes the wrong commit now. The
+    // caller re-requests it (see `Engine::jump_to`) if the gutter is visible.
+    state.blame = None;
     if let Some(top) = diff::freshest_changed_line(&ghosts) {
         state.scroll_target = u16::try_from(top.saturating_sub(FOLLOW_MARGIN))
             .unwrap_or(u16::MAX)
             .min(state.max_scroll());
     }
     state.ghosts = ghosts;
+}
+
+/// Merge in a blame result the background worker finished computing. The
+/// caller (`Engine::drain_blame`) has already checked the generation still
+/// matches the latest request before calling this.
+pub fn set_blame(state: &mut AppState, lines: Vec<BlameLine>) {
+    state.blame = Some(lines);
+}
+
+/// Enter `/`-search mode with an empty query.
+pub fn search_start(state: &mut AppState) {
+    state.search = Some(String::new());
+}
+
+pub fn search_type(state: &mut AppState, c: char) {
+    if let Some(query) = &mut state.search {
+        query.push(c);
+    }
+}
+
+pub fn search_backspace(state: &mut AppState) {
+    if let Some(query) = &mut state.search {
+        query.pop();
+    }
+}
+
+/// Leave search mode without moving the playhead.
+pub fn search_cancel(state: &mut AppState) {
+    state.search = None;
+}
+
+/// Case-insensitive subsequence match: every character of `query`, in order,
+/// appears somewhere in `text` (not necessarily contiguous) — the same notion
+/// of "fuzzy" fzf's basic mode uses.
+fn fuzzy_matches(query: &str, text: &str) -> bool {
+    let haystack = text.to_lowercase();
+    let mut chars = haystack.chars();
+    query
+        .to_lowercase()
+        .chars()
+        .all(|qc| chars.any(|tc| tc == qc))
+}
+
+/// The nearest commit *after* the playhead (wrapping around to the start)
+/// whose summary fuzzy-matches the current search query — vim's "search
+/// forward, wrap" behavior. `None` if there's no query, no match, or an empty
+/// timeline.
+pub fn search_target(state: &AppState) -> Option<usize> {
+    let query = state.search.as_ref()?;
+    if query.is_empty() {
+        return None;
+    }
+    let n = state.timeline.len();
+    if n == 0 {
+        return None;
+    }
+    (1..=n)
+        .map(|offset| (state.playhead + offset) % n)
+        .find(|&i| fuzzy_matches(query, &state.timeline[i].summary))
+}
+
+/// The nearest commit at least `seconds` away from the playhead's commit time,
+/// in the given direction, clamped to the ends of history — the `w`/`b`
+/// (day) and `{`/`}` (week) jump motions.
+pub fn jump_target(state: &AppState, forward: bool, seconds: i64) -> usize {
+    let Some(current_time) = state.current_commit().map(|c| c.time) else {
+        return state.playhead;
+    };
+    let n = state.timeline.len();
+    if forward {
+        let target_time = current_time + seconds;
+        (state.playhead + 1..n)
+            .find(|&i| state.timeline[i].time >= target_time)
+            .unwrap_or_else(|| n.saturating_sub(1))
+    } else {
+        let target_time = current_time - seconds;
+        (0..state.playhead)
+            .rev()
+            .find(|&i| state.timeline[i].time <= target_time)
+            .unwrap_or(0)
+    }
 }
 
 /// Nudge `scroll` a fraction of the way toward `scroll_target`, called once per
@@ -178,13 +291,19 @@ mod tests {
     use git2::Oid;
 
     fn commit(summary: &str) -> CommitMeta {
+        commit_at(summary, 0)
+    }
+
+    fn commit_at(summary: &str, time: i64) -> CommitMeta {
         CommitMeta {
             oid: Oid::zero(),
-            time: 0,
+            time,
             author: "a".into(),
             summary: summary.into(),
             insertions: 0,
             deletions: 0,
+            is_merge: false,
+            is_tagged: false,
         }
     }
 
@@ -332,5 +451,106 @@ mod tests {
             update(&mut state, Action::SpeedDown);
         }
         assert_eq!(state.speed_ms, MAX_TICK_MS);
+    }
+
+    #[test]
+    fn toggle_blame_off_clears_any_cached_result() {
+        let mut state = state_with(vec![commit("A")]);
+        state.blame = Some(vec![BlameLine {
+            author: "a".into(),
+            age_days: 0,
+        }]);
+        update(&mut state, Action::ToggleBlame); // false -> true: blame_visible flips, cache untouched
+        assert!(state.blame_visible);
+        assert!(state.blame.is_some());
+
+        update(&mut state, Action::ToggleBlame); // true -> false: hiding clears the cache too
+        assert!(!state.blame_visible);
+        assert!(state.blame.is_none());
+    }
+
+    #[test]
+    fn set_playhead_always_invalidates_blame() {
+        let mut state = state_with(vec![commit("A"), commit("B")]);
+        state.blame = Some(vec![]);
+        set_playhead(
+            &mut state,
+            1,
+            snapshot("x\n"),
+            HashMap::new(),
+            Direction::Forward,
+        );
+        assert!(state.blame.is_none());
+    }
+
+    #[test]
+    fn search_mode_types_and_cancels() {
+        let mut state = state_with(vec![commit("A")]);
+        assert!(state.search.is_none());
+
+        search_start(&mut state);
+        search_type(&mut state, 'f');
+        search_type(&mut state, 'x');
+        assert_eq!(state.search.as_deref(), Some("fx"));
+
+        search_backspace(&mut state);
+        assert_eq!(state.search.as_deref(), Some("f"));
+
+        search_cancel(&mut state);
+        assert!(state.search.is_none());
+    }
+
+    #[test]
+    fn search_target_finds_nearest_fuzzy_match_forward_and_wraps() {
+        let mut state = state_with(vec![
+            commit("fix bug"),
+            commit("add feature"),
+            commit("refactor core"),
+            commit("fix typo"),
+        ]);
+        state.playhead = 0;
+        state.search = Some("fx".into()); // subsequence of "fix", not "add"/"refactor"
+
+        // Nearest match strictly after the playhead: index 3 ("fix typo").
+        assert_eq!(search_target(&state), Some(3));
+
+        state.playhead = 3;
+        // From the last index, wraps back around to index 0 ("fix bug").
+        assert_eq!(search_target(&state), Some(0));
+    }
+
+    #[test]
+    fn search_target_is_none_without_a_query_or_a_match() {
+        let mut state = state_with(vec![commit("a"), commit("b")]);
+        assert_eq!(search_target(&state), None); // no query yet
+
+        state.search = Some("zzz".into());
+        assert_eq!(search_target(&state), None); // no match
+
+        state.search = Some(String::new());
+        assert_eq!(search_target(&state), None); // empty query
+    }
+
+    #[test]
+    fn jump_target_finds_the_nearest_commit_at_least_a_day_away() {
+        let day = 86_400;
+        let mut state = state_with(vec![
+            commit_at("t0", 0),
+            commit_at("t0.5", day / 2),
+            commit_at("t1", day),
+            commit_at("t2", 2 * day),
+        ]);
+        state.playhead = 0;
+        assert_eq!(jump_target(&state, true, day), 2); // first commit >= +1 day
+
+        state.playhead = 3; // time = 2*day; target = 2*day - day = day
+        assert_eq!(jump_target(&state, false, day), 2); // "t1" is exactly 1 day back
+    }
+
+    #[test]
+    fn jump_target_clamps_at_the_ends_of_history() {
+        let state = state_with(vec![commit_at("only", 0)]);
+        assert_eq!(jump_target(&state, true, 86_400), 0);
+        assert_eq!(jump_target(&state, false, 86_400), 0);
     }
 }
