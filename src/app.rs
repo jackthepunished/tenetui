@@ -1,11 +1,29 @@
 //! The single source of truth. `draw()` reads `AppState`; only `update()` (and
-//! [`set_playhead`], for the scrub path) mutate it. Keeping mutation here — and
-//! out of rendering — is what makes the UI a pure function of state; see
-//! docs/decisions.md "Immediate-mode state model".
+//! [`set_playhead`]/[`ease_scroll`], for the scrub and auto-follow paths) mutate
+//! it. Keeping mutation here — and out of rendering — is what makes the UI a
+//! pure function of state; see docs/decisions.md "Immediate-mode state model".
 
+use crate::diff;
 use crate::input::Action;
 use crate::repo::{CommitMeta, Snapshot};
 use crate::theme::Theme;
+use std::collections::HashMap;
+
+/// Default playback cadence: one commit every 250ms.
+const DEFAULT_TICK_MS: u64 = 250;
+const MIN_TICK_MS: u64 = 30;
+const MAX_TICK_MS: u64 = 2000;
+
+/// Lines of context kept above a freshly changed region when auto-scroll follows it.
+const FOLLOW_MARGIN: usize = 3;
+
+/// Which way the playhead last moved — sets the ghost-glow hue (forward = red,
+/// inverted = blue) and which way playback continues when `space` is pressed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    Forward,
+    Backward,
+}
 
 /// Everything the renderer needs for a frame.
 pub struct AppState {
@@ -18,8 +36,19 @@ pub struct AppState {
     pub playhead: usize,
     /// The file as it existed at `playhead`.
     pub current: Snapshot,
-    /// Vertical scroll offset into the file pane.
+    /// Lines changed by the last transition, decaying toward zero. Keyed by
+    /// 0-indexed line number in `current`. See `diff::compute_ghosts`.
+    pub ghosts: HashMap<usize, u8>,
+    /// Which way the playhead last moved; sets ghost hue and playback direction.
+    pub direction: Direction,
+    pub playing: bool,
+    /// Milliseconds per commit during playback.
+    pub speed_ms: u64,
+    /// Vertical scroll offset into the file pane, as currently rendered.
     pub scroll: u16,
+    /// Where `scroll` is easing toward — set by a transition's changed region,
+    /// or snapped to `scroll` itself by manual scrolling. See [`ease_scroll`].
+    pub scroll_target: u16,
     pub should_quit: bool,
 }
 
@@ -37,7 +66,12 @@ impl AppState {
             timeline,
             playhead,
             current,
+            ghosts: HashMap::new(),
+            direction: Direction::Forward,
+            playing: false,
+            speed_ms: DEFAULT_TICK_MS,
             scroll: 0,
+            scroll_target: 0,
             should_quit: false,
         }
     }
@@ -63,24 +97,78 @@ pub fn update(state: &mut AppState, action: Action) {
         Action::Quit => state.should_quit = true,
         Action::ScrollDown => {
             state.scroll = (state.scroll + 1).min(state.max_scroll());
+            state.scroll_target = state.scroll; // manual scroll cancels auto-follow
         }
         Action::ScrollUp => {
             state.scroll = state.scroll.saturating_sub(1);
+            state.scroll_target = state.scroll;
         }
-        Action::Top => state.scroll = 0,
-        Action::Bottom => state.scroll = state.max_scroll(),
+        Action::Top => {
+            state.scroll = 0;
+            state.scroll_target = 0;
+        }
+        Action::Bottom => {
+            state.scroll = state.max_scroll();
+            state.scroll_target = state.scroll;
+        }
         Action::ScrubBackward | Action::ScrubForward => {}
+        Action::TogglePlayback => state.playing = !state.playing,
+        Action::SpeedUp => {
+            state.speed_ms = ((state.speed_ms as f32 * 0.75) as u64).max(MIN_TICK_MS);
+        }
+        Action::SpeedDown => {
+            state.speed_ms = ((state.speed_ms as f32 * 1.34) as u64).min(MAX_TICK_MS);
+        }
     }
 }
 
-/// Move the playhead to `index` and swap in the snapshot already resolved for
-/// it. Pure assignment — no I/O here, matching the rest of the update path;
-/// the fetch happens in the caller before this is invoked.
-pub fn set_playhead(state: &mut AppState, index: usize, snapshot: Snapshot) {
+/// Move the playhead to `index`, swap in the snapshot and ghost map already
+/// resolved for the transition, and re-aim the auto-scroll follow target at
+/// whatever just changed. Pure assignment — no I/O here; the fetch and diff
+/// happen in the caller before this is invoked.
+///
+/// `scroll` itself is left untouched so [`ease_scroll`] can animate toward the
+/// new target across the next few frames instead of snapping.
+pub fn set_playhead(
+    state: &mut AppState,
+    index: usize,
+    snapshot: Snapshot,
+    ghosts: HashMap<usize, u8>,
+    direction: Direction,
+) {
     debug_assert!(index < state.timeline.len().max(1));
     state.playhead = index;
     state.current = snapshot;
-    state.scroll = 0;
+    state.direction = direction;
+    if let Some(top) = diff::freshest_changed_line(&ghosts) {
+        state.scroll_target = u16::try_from(top.saturating_sub(FOLLOW_MARGIN))
+            .unwrap_or(u16::MAX)
+            .min(state.max_scroll());
+    }
+    state.ghosts = ghosts;
+}
+
+/// Nudge `scroll` a fraction of the way toward `scroll_target`, called once per
+/// frame regardless of what triggered it — this is the "eases toward... rather
+/// than snapping" auto-scroll motion from the whitepaper. Pure arithmetic, safe
+/// to call unconditionally; a no-op once `scroll == scroll_target`.
+pub fn ease_scroll(state: &mut AppState) {
+    if state.scroll == state.scroll_target {
+        return;
+    }
+    let diff = i32::from(state.scroll_target) - i32::from(state.scroll);
+    let step = (diff.unsigned_abs() / 3).max(1);
+    if diff > 0 {
+        state.scroll = state
+            .scroll
+            .saturating_add(step as u16)
+            .min(state.scroll_target);
+    } else {
+        state.scroll = state
+            .scroll
+            .saturating_sub(step as u16)
+            .max(state.scroll_target);
+    }
 }
 
 #[cfg(test)]
@@ -144,16 +232,69 @@ mod tests {
     }
 
     #[test]
-    fn set_playhead_swaps_snapshot_and_resets_scroll() {
-        let mut state = state_with(vec![commit("A"), commit("B")]);
-        update(&mut state, Action::Bottom); // move scroll off zero first
-        assert_ne!(state.scroll, 0);
+    fn manual_scroll_cancels_the_auto_follow_target() {
+        let mut state = state_with(vec![commit("A")]);
+        state.scroll_target = 2; // pretend a transition is easing us toward line 2
+        update(&mut state, Action::ScrollUp);
+        // Manual input takes over immediately; nothing should keep easing past it.
+        assert_eq!(state.scroll_target, state.scroll);
+    }
 
-        set_playhead(&mut state, 0, snapshot("only one line\n"));
+    #[test]
+    fn set_playhead_swaps_snapshot_and_ghosts_but_leaves_scroll_for_easing() {
+        let mut state = state_with(vec![commit("A"), commit("B")]);
+        state.scroll = 5;
+
+        set_playhead(
+            &mut state,
+            0,
+            snapshot("only one line\n"),
+            HashMap::new(),
+            Direction::Backward,
+        );
 
         assert_eq!(state.playhead, 0);
         assert_eq!(&*state.current.content, "only one line\n");
-        assert_eq!(state.scroll, 0);
+        assert_eq!(state.direction, Direction::Backward);
+        // No fresh ghosts this transition, so the follow target doesn't move...
+        assert_eq!(state.scroll_target, 0);
+        // ...and `scroll` itself is untouched, left for `ease_scroll` to animate.
+        assert_eq!(state.scroll, 5);
+    }
+
+    #[test]
+    fn set_playhead_aims_the_follow_target_at_the_freshest_change() {
+        let mut state = state_with(vec![commit("A"), commit("B")]);
+        let ghosts = HashMap::from([(10usize, diff::GHOST_MAX_DECAY)]);
+
+        set_playhead(
+            &mut state,
+            1,
+            snapshot("l\n".repeat(20).as_str()),
+            ghosts,
+            Direction::Forward,
+        );
+
+        assert_eq!(state.scroll_target, 7); // 10 - FOLLOW_MARGIN(3)
+    }
+
+    #[test]
+    fn ease_scroll_converges_without_overshoot() {
+        let mut state = state_with(vec![commit("A")]);
+        state.scroll = 0;
+        state.scroll_target = 10;
+
+        let mut steps = 0;
+        while state.scroll != state.scroll_target {
+            ease_scroll(&mut state);
+            steps += 1;
+            assert!(steps < 100, "ease_scroll never converged");
+        }
+        assert_eq!(state.scroll, 10);
+
+        // Calling again once converged must be a no-op, not oscillate.
+        ease_scroll(&mut state);
+        assert_eq!(state.scroll, 10);
     }
 
     #[test]
@@ -165,5 +306,31 @@ mod tests {
         update(&mut state, Action::ScrubForward);
         update(&mut state, Action::ScrubBackward);
         assert_eq!(state.playhead, before);
+    }
+
+    #[test]
+    fn toggle_playback_flips_the_flag() {
+        let mut state = state_with(vec![commit("A")]);
+        assert!(!state.playing);
+        update(&mut state, Action::TogglePlayback);
+        assert!(state.playing);
+        update(&mut state, Action::TogglePlayback);
+        assert!(!state.playing);
+    }
+
+    #[test]
+    fn speed_up_and_down_stay_within_bounds() {
+        let mut state = state_with(vec![commit("A")]);
+        assert_eq!(state.speed_ms, DEFAULT_TICK_MS);
+
+        for _ in 0..50 {
+            update(&mut state, Action::SpeedUp);
+        }
+        assert_eq!(state.speed_ms, MIN_TICK_MS);
+
+        for _ in 0..50 {
+            update(&mut state, Action::SpeedDown);
+        }
+        assert_eq!(state.speed_ms, MAX_TICK_MS);
     }
 }

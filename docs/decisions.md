@@ -33,3 +33,27 @@ Append-only. One dated entry per non-trivial technical decision. Format: context
 **Context:** CLAUDE.md references `docs/whitepaper.md` etc., but the four markdown files were sitting in the repo root.
 **Decision:** Move whitepaper/architecture/roadmap/decisions into `docs/` to match the documented layout rather than rewriting CLAUDE.md's paths.
 **Consequences:** CLAUDE.md's `@docs/*` references resolve correctly; repo root stays clean for the forthcoming Cargo project.
+
+## 2026-07-05 — Playback tick reuses the input poll timeout
+
+**Context:** Playback needs a fixed-cadence tick to auto-advance the playhead. A naive design spawns a dedicated ticker thread/timer.
+**Decision:** No ticker thread. `crossterm::event::poll`'s timeout doubles as the tick: while playing, the loop polls with `state.speed_ms`; a timeout with no key event *is* the tick, advancing one commit via the same `Engine::scrub` path manual `h`/`l` uses. Exactly the "one event loop, one tick source" already specified in docs/architecture.md.
+**Consequences:** No extra thread, no extra channel, no risk of a ticker and a keypress racing on `AppState`. Speed changes (`+`/`-`) take effect on the very next poll since the timeout is recomputed every loop iteration. Trade-off: tick precision is bounded by key-event latency, fine at the ~30ms-2000ms range this app needs, not suitable for sub-frame timing.
+
+## 2026-07-05 — Prefetch thread always refetches its window; no cross-thread cache
+
+**Context:** The background warmer (`repo::prefetch::run`) and the main thread's `SnapshotCache` are two different pieces of state on two different threads, by design (never share a `git2::Repository`, and channels are one-way data, not shared mutable state).
+**Decision:** On every hint, the prefetch thread recomputes and refetches its entire ±20 window unconditionally, rather than tracking which oids it already warmed. It also coalesces the hint channel to only the latest position, so rapid scrubbing doesn't queue up stale windows.
+**Consequences:** Simpler thread (no local cache to invalidate or bound), and the redundant git2 lookups happen off the render thread so they never touch the 16ms frame budget. Cost is up to ~41 tree lookups per hint even when most were already warmed last time; acceptable at M2's scale (a single file's history), revisit if profiling on a very large repo shows it matters.
+
+## 2026-07-05 — Auto-scroll: eased top-anchored follow, not viewport-centered
+
+**Context:** M2's roadmap bullet asks for the viewport to follow the most-recently-changed region. True centering needs the render viewport's height, but `draw()` must stay a pure read of `AppState` — plumbing terminal size into it (or having it write back) would break that invariant.
+**Decision:** `app::set_playhead` aims `scroll_target` at the lowest freshly changed line minus a fixed `FOLLOW_MARGIN` (3 lines of context), computed from the ghost map alone — no viewport height needed. `app::ease_scroll`, called once per frame regardless of input, nudges `scroll` a fraction of the remaining distance toward `scroll_target` each tick, which is the whitepaper's "eases toward... rather than snapping" in practice.
+**Consequences:** Changed lines are guaranteed visible near the top of the pane on any terminal size, motion is smooth (no snapping), and the mechanism stays inside `app.rs` with zero new coupling between rendering and control state. What it isn't: perfectly centered in the viewport — that's a fast-follow if we later thread `terminal.size()` through to the scrub path, not a blocker for M2's accept criterion.
+
+## 2026-07-05 — Deletion +/- gutter sign deferred
+
+**Context:** The whitepaper's "Directional ghosting" section says addition vs. deletion should be carried by luminance + a gutter sign, not hue. But the file pane only ever renders the file *as it exists at the playhead* — a deleted line has no position left to anchor a `-` marker to once it's gone from `new`.
+**Decision:** Ship glow + decay (hue = direction, luminance = decay) for M2 without the +/- gutter sign; `diff::compute_ghosts` only marks lines present in the new content. Not a scope cut, silently — flagging it here because there's no obvious single-pane rendering target for a pure deletion yet.
+**Consequences:** Additions and edits glow correctly today. A deletion's *absence* is currently invisible at the deleted position (the surrounding lines simply shift). Revisit alongside M3's blame gutter, which already reserves left-margin space — a transient "− N lines removed here" marker is the likely design, not attempted now.

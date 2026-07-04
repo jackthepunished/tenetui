@@ -1,8 +1,8 @@
 //! The ONE table where keys become actions. Per the project conventions, no
 //! widget matches keys on its own — everything funnels through [`map_key`].
 //!
-//! M0 + M1 bindings. Playback (`space`), jumps (`w`/`b`, `g`/`G`, `/`), and blame
-//! (`b`) join this table as their milestones land.
+//! M0 + M1 + M2 bindings. Jumps (`w`/`b`, `g`/`G`, `/`) and blame (`b`) join this
+//! table as their milestones land.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -18,6 +18,10 @@ pub enum Action {
     ScrubBackward,
     /// Move the playhead one commit toward the future — forward, red.
     ScrubForward,
+    /// Start/stop autoplay, continuing in the last scrub direction.
+    TogglePlayback,
+    SpeedUp,
+    SpeedDown,
 }
 
 /// Map a key press to an action, or `None` if the key is unbound.
@@ -31,6 +35,9 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
         (_, KeyCode::End) => Some(Action::Bottom),
         (_, KeyCode::Char('h')) | (_, KeyCode::Left) => Some(Action::ScrubBackward),
         (_, KeyCode::Char('l')) | (_, KeyCode::Right) => Some(Action::ScrubForward),
+        (_, KeyCode::Char(' ')) => Some(Action::TogglePlayback),
+        (_, KeyCode::Char('+')) | (_, KeyCode::Char('=')) => Some(Action::SpeedUp),
+        (_, KeyCode::Char('-')) | (_, KeyCode::Char('_')) => Some(Action::SpeedDown),
         _ => None,
     }
 }
@@ -62,5 +69,19 @@ mod tests {
         let mut k = key(KeyCode::Char('l'));
         k.kind = KeyEventKind::Release;
         assert_eq!(map_key(k), Some(Action::ScrubForward));
+    }
+
+    #[test]
+    fn space_toggles_playback_and_shift_agnostic_keys_adjust_speed() {
+        assert_eq!(
+            map_key(key(KeyCode::Char(' '))),
+            Some(Action::TogglePlayback)
+        );
+        // Both the shifted and unshifted physical key work, since terminals vary
+        // in whether they report '+'/'=' or '-'/'_' depending on the keyboard.
+        assert_eq!(map_key(key(KeyCode::Char('+'))), Some(Action::SpeedUp));
+        assert_eq!(map_key(key(KeyCode::Char('='))), Some(Action::SpeedUp));
+        assert_eq!(map_key(key(KeyCode::Char('-'))), Some(Action::SpeedDown));
+        assert_eq!(map_key(key(KeyCode::Char('_'))), Some(Action::SpeedDown));
     }
 }

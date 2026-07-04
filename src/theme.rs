@@ -130,8 +130,7 @@ impl Theme {
     /// Ghost-trail color for a changed line: `Past`/`Future` sets the hue by scrub
     /// direction, `decay` (`1.0` = fresh glow → `0.0` = faded to base) sets how far
     /// it has cooled back toward the foreground. Add/delete is *not* encoded here —
-    /// that's luminance + a gutter sign elsewhere. (Wired up in M2.)
-    #[allow(dead_code)]
+    /// that's luminance + a gutter sign elsewhere (deferred; see docs/decisions.md).
     pub fn ghost(&self, pole: Pole, decay: f32) -> Color {
         let glow = match pole {
             Pole::Past => BLUE,

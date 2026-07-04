@@ -2,6 +2,7 @@
 //! it never touches a `git2` type. `Repository` is `!Sync`, so each thread that
 //! needs one owns its own handle (see docs/architecture.md "Threading").
 
+pub mod prefetch;
 mod snapshot;
 mod walk;
 

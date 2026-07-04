@@ -22,10 +22,10 @@ Milestones are ordered; each produces something runnable. Claude Code: tick chec
 
 ## M2 — Playback + ghosting (the demo)
 
-- [ ] `space` toggles playback; `+`/`-` adjust speed; playhead animates via tick events
-- [ ] Line diff between consecutive snapshots (`similar`), changed lines glow and decay over ~5 steps
-- [ ] Background prefetch thread warms cache ±20 commits around playhead
-- [ ] Auto-scroll: viewport follows the region with the most recent changes during playback
+- [x] `space` toggles playback; `+`/`-` adjust speed; playhead animates via tick events
+- [x] Line diff between consecutive snapshots (`similar`), changed lines glow and decay over ~5 steps
+- [x] Background prefetch thread warms cache ±20 commits around playhead
+- [x] Auto-scroll: viewport follows the region with the most recent changes during playback
 
 **Accept:** a screen recording of playback on a real repo is legible and smooth — this is the README GIF.
 

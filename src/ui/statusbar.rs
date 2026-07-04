@@ -1,6 +1,7 @@
 //! Status bar: where you are in history (left) and the key hints (right).
+//! The right side becomes a playback indicator while playing.
 
-use crate::app::AppState;
+use crate::app::{AppState, Direction};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::Style;
@@ -45,10 +46,24 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         ));
     }
 
-    let hint = Line::from(Span::styled(
-        "h/l scrub · j/k scroll · q quit",
-        Style::default().fg(th.chrome()),
-    ));
+    let hint = if state.playing {
+        let (arrow, label, color) = match state.direction {
+            Direction::Forward => ("▶", "forward", th.forward()),
+            Direction::Backward => ("◀", "inverted", th.inverted()),
+        };
+        Line::from(vec![
+            Span::styled(
+                format!("{arrow} playing {label}"),
+                Style::default().fg(color),
+            ),
+            Span::styled("  ·  space pause", Style::default().fg(th.chrome())),
+        ])
+    } else {
+        Line::from(Span::styled(
+            "h/l scrub · space play · j/k scroll · q quit",
+            Style::default().fg(th.chrome()),
+        ))
+    };
 
     frame.render_widget(
         Paragraph::new(Line::from(left)).alignment(Alignment::Left),

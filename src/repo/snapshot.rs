@@ -62,6 +62,12 @@ impl SnapshotCache {
         }
     }
 
+    /// Merge in a snapshot materialized elsewhere — the background prefetch
+    /// thread's channel-delivered results land here.
+    pub fn insert(&mut self, oid: Oid, snapshot: Snapshot) {
+        self.inner.put(oid, snapshot);
+    }
+
     /// Return the cached snapshot for `oid`, or materialize and insert it on miss.
     pub fn get_or_fetch(&mut self, repo: &Repository, oid: Oid, path: &str) -> Result<Snapshot> {
         if let Some(hit) = self.inner.get(&oid) {
