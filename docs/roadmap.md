@@ -1,0 +1,54 @@
+# tenetui — Roadmap
+
+Milestones are ordered; each produces something runnable. Claude Code: tick checkboxes as items land, and don't start a milestone before the previous one's acceptance criteria pass.
+
+## M0 — Skeleton (walking app)
+
+- [x] Cargo project with ratatui + crossterm event loop, clean shutdown, terminal restore on panic
+- [x] CLI args: repo path + file path (clap), friendly error if not a git repo
+- [x] `repo::timeline()` — walk history for the file via git2, return `Vec<CommitMeta>` (oid, time, author, summary, insertions, deletions)
+- [x] Static render: file content at HEAD in main pane, commit count in status bar
+
+**Accept:** `cargo run -- . src/main.rs` opens, shows the file, quits with `q`, never leaves the terminal broken.
+
+## M1 — Timeline + scrubbing (core loop)
+
+- [ ] Timeline widget: commits as heatmap cells, churn → color intensity, playhead cursor
+- [ ] `h`/`l` move playhead one commit; main pane re-renders file at that commit
+- [ ] Snapshot materialization via git2 tree lookup, LRU cache (`lru` crate)
+- [ ] Status bar: commit summary, author, date, position (n/total)
+
+**Accept:** scrubbing a 1k-commit file feels instant (<16 ms cached); no flicker.
+
+## M2 — Playback + ghosting (the demo)
+
+- [ ] `space` toggles playback; `+`/`-` adjust speed; playhead animates via tick events
+- [ ] Line diff between consecutive snapshots (`similar`), changed lines glow and decay over ~5 steps
+- [ ] Background prefetch thread warms cache ±20 commits around playhead
+- [ ] Auto-scroll: viewport follows the region with the most recent changes during playback
+
+**Accept:** a screen recording of playback on a real repo is legible and smooth — this is the README GIF.
+
+## M3 — Blame gutter + navigation
+
+- [ ] Blame gutter (toggle `b`): author + relative age per line, computed async on scrub pause
+- [ ] Jump motions: `w`/`b` by day, `{`/`}` by week, `g`/`G` first/last, `/` fuzzy-search commit messages
+- [ ] Tag and merge markers on the timeline
+
+**Accept:** blame never blocks scrubbing; navigation works on linux.git without stalls.
+
+## M4 — Polish + release
+
+- [ ] Syntax highlighting (syntect), theme respects terminal colors
+- [ ] Config file (`~/.config/tenetui/config.toml`): keybinds, speed, cache size
+- [ ] Help overlay (`?`), README with GIF, `cargo install tenetui` published to crates.io
+- [ ] Criterion benches for snapshot + diff hot paths; CI (fmt, clippy -D warnings, test)
+
+**Accept:** a stranger can install and use it without reading anything but `?`.
+
+## M5 — Stretch (post-v1, unordered)
+
+- [ ] Function-level tracking (`git log -L` equivalent via tree-sitter ranges)
+- [ ] "Volatile files" overview screen: repo-wide churn ranking as entry point
+- [ ] Rename following across file moves
+- [ ] Temporal pincer mode: two playheads side-by-side, one scrubbing forward and one inverted, compare eras

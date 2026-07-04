@@ -1,0 +1,24 @@
+[package]
+name = "tenetui"
+version = "0.0.0"
+edition = "2024"
+description = "Scrub through a file's git history like a video timeline — forward and inverted."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/emrecintass/tenetui"
+readme = "README.md"
+keywords = ["git", "tui", "history", "ratatui", "timeline"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
+ratatui = "0.29"
+git2 = "0.19"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
