@@ -13,10 +13,10 @@ Milestones are ordered; each produces something runnable. Claude Code: tick chec
 
 ## M1 — Timeline + scrubbing (core loop)
 
-- [ ] Timeline widget: commits as heatmap cells, churn → color intensity, playhead cursor
-- [ ] `h`/`l` move playhead one commit; main pane re-renders file at that commit
-- [ ] Snapshot materialization via git2 tree lookup, LRU cache (`lru` crate)
-- [ ] Status bar: commit summary, author, date, position (n/total)
+- [x] Timeline widget: commits as heatmap cells, churn → color intensity, playhead cursor
+- [x] `h`/`l` move playhead one commit; main pane re-renders file at that commit
+- [x] Snapshot materialization via git2 tree lookup, LRU cache (`lru` crate)
+- [x] Status bar: commit summary, author, date, position (n/total)
 
 **Accept:** scrubbing a 1k-commit file feels instant (<16 ms cached); no flicker.
 

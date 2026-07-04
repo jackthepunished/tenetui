@@ -1,9 +1,8 @@
 //! The timeline strip — a churn heatmap and the *pincer* color code: blue toward
 //! the past (left of the playhead), red toward the future (right), white pivot at
 //! the playhead. Block height encodes churn magnitude, hue encodes direction.
-//!
-//! M0 renders it static (playhead pinned at HEAD, so history reads all-inverted /
-//! blue behind you). Interactive scrubbing that sweeps the red/blue boundary is M1.
+//! Scrubbing (`h`/`l`, wired in `main::scrub`) moves `state.playhead`, which
+//! sweeps this red/blue boundary along the bar.
 
 use crate::app::AppState;
 use crate::theme::Pole;
@@ -84,4 +83,83 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::AppState;
+    use crate::repo::{CommitMeta, Snapshot};
+    use crate::theme::{ColorDepth, Theme};
+    use git2::Oid;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
+
+    fn meta() -> CommitMeta {
+        CommitMeta {
+            oid: Oid::zero(),
+            time: 0,
+            author: "a".into(),
+            summary: "s".into(),
+            insertions: 1,
+            deletions: 0,
+        }
+    }
+
+    /// Render the timeline alone into a 1-row buffer and pull out each column's
+    /// foreground color, one per terminal cell.
+    fn render_row(state: &AppState, width: u16) -> Vec<Color> {
+        let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+        terminal
+            .draw(|frame| render(frame, frame.area(), state))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..width).map(|x| buffer[(x, 0)].fg).collect()
+    }
+
+    fn is_red_dominant(c: Color) -> bool {
+        matches!(c, Color::Rgb(r, _, b) if r > b)
+    }
+
+    fn is_blue_dominant(c: Color) -> bool {
+        matches!(c, Color::Rgb(r, _, b) if b > r)
+    }
+
+    /// This is the whole visual thesis: moving the playhead must sweep the
+    /// red/future | blue/past boundary along the bar, not just paint a static
+    /// gradient. Width == commit count here so column index == commit index,
+    /// making the boundary position exactly predictable.
+    #[test]
+    fn pincer_boundary_follows_the_playhead() {
+        let timeline: Vec<_> = (0..10).map(|_| meta()).collect();
+        let mut state = AppState::new(
+            Theme {
+                depth: ColorDepth::TrueColor,
+            },
+            "f.txt".into(),
+            timeline,
+            Snapshot {
+                oid: Oid::zero(),
+                content: "x\n".into(),
+                existed: true,
+            },
+        );
+
+        state.playhead = 2;
+        let at_2 = render_row(&state, 10);
+        assert!(is_blue_dominant(at_2[0]), "before playhead should be blue");
+        assert!(is_blue_dominant(at_2[1]), "before playhead should be blue");
+        assert!(is_red_dominant(at_2[9]), "after playhead should be red");
+
+        state.playhead = 7;
+        let at_7 = render_row(&state, 10);
+        // Column 2 was on the red/future side of playhead 2; once the playhead
+        // sweeps past it to 7, it must flip to blue/past.
+        assert!(
+            is_blue_dominant(at_7[2]),
+            "column should flip red->blue once the playhead passes it"
+        );
+        assert!(is_red_dominant(at_7[9]), "still ahead of playhead 7");
+    }
 }

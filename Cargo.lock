@@ -921,6 +921,7 @@ dependencies = [
  "clap",
  "crossterm",
  "git2",
+ "lru",
  "ratatui",
  "tempfile",
 ]

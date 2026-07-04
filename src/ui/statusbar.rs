@@ -1,5 +1,4 @@
 //! Status bar: where you are in history (left) and the key hints (right).
-//! M0 shows position + the playhead commit; dates land with the M1 status work.
 
 use crate::app::AppState;
 use ratatui::Frame;
@@ -33,6 +32,11 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
             commit.author.clone(),
             Style::default().fg(th.chrome()),
         ));
+        left.push(sep());
+        left.push(Span::styled(
+            commit.date(),
+            Style::default().fg(th.chrome()),
+        ));
     } else {
         left.push(sep());
         left.push(Span::styled(
@@ -42,7 +46,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     }
 
     let hint = Line::from(Span::styled(
-        "j/k scroll · q quit",
+        "h/l scrub · j/k scroll · q quit",
         Style::default().fg(th.chrome()),
     ));
 

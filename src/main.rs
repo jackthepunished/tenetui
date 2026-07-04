@@ -14,9 +14,17 @@ use anyhow::{Context, Result};
 use app::AppState;
 use clap::Parser;
 use crossterm::event::{self, Event, KeyEventKind};
+use git2::Repository;
+use input::Action;
 use ratatui::DefaultTerminal;
+use repo::SnapshotCache;
 use std::path::PathBuf;
 use std::time::Duration;
+
+/// Snapshot cache capacity. M1 has no background prefetch yet (that's M2's
+/// ±20-around-the-playhead warmer), so this just needs to comfortably hold a
+/// session's worth of manual back-and-forth scrubbing.
+const SNAPSHOT_CACHE_CAPACITY: usize = 256;
 
 #[derive(Parser)]
 #[command(
@@ -56,16 +64,22 @@ fn main() -> Result<()> {
     }
 
     let state = AppState::new(theme::Theme::new(), rel, timeline, current);
+    let cache = SnapshotCache::new(SNAPSHOT_CACHE_CAPACITY);
 
     // `ratatui::init` enables raw mode, enters the alternate screen, and installs
     // a panic hook that restores the terminal — so a crash never leaves it broken.
     let mut terminal = ratatui::init();
-    let result = run(&mut terminal, state);
+    let result = run(&mut terminal, &repo, cache, state);
     ratatui::restore();
     result
 }
 
-fn run(terminal: &mut DefaultTerminal, mut state: AppState) -> Result<()> {
+fn run(
+    terminal: &mut DefaultTerminal,
+    repo: &Repository,
+    mut cache: SnapshotCache,
+    mut state: AppState,
+) -> Result<()> {
     while !state.should_quit {
         terminal
             .draw(|frame| ui::draw(frame, &state))
@@ -79,8 +93,40 @@ fn run(terminal: &mut DefaultTerminal, mut state: AppState) -> Result<()> {
             && key.kind == KeyEventKind::Press
             && let Some(action) = input::map_key(key)
         {
-            app::update(&mut state, action);
+            match action {
+                Action::ScrubForward => scrub(&mut state, repo, &mut cache, true)?,
+                Action::ScrubBackward => scrub(&mut state, repo, &mut cache, false)?,
+                other => app::update(&mut state, other),
+            }
         }
     }
+    Ok(())
+}
+
+/// Resolve one commit-step of scrubbing: pick the neighboring playhead index,
+/// fetch its snapshot (cache hit or a git2 tree lookup), then hand the result to
+/// `app::set_playhead` as a plain assignment. This is the only place the event
+/// loop talks to git2 — `app`/`ui` never do.
+fn scrub(
+    state: &mut AppState,
+    repo: &Repository,
+    cache: &mut SnapshotCache,
+    forward: bool,
+) -> Result<()> {
+    let len = state.timeline.len();
+    if len == 0 {
+        return Ok(());
+    }
+    let next = if forward {
+        (state.playhead + 1).min(len - 1)
+    } else {
+        state.playhead.saturating_sub(1)
+    };
+    if next == state.playhead {
+        return Ok(());
+    }
+    let oid = state.timeline[next].oid;
+    let snapshot = cache.get_or_fetch(repo, oid, &state.file_path)?;
+    app::set_playhead(state, next, snapshot);
     Ok(())
 }
