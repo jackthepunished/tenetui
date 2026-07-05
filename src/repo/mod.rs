@@ -5,10 +5,12 @@
 pub mod blame;
 pub mod prefetch;
 mod snapshot;
+mod volatility;
 mod walk;
 
 pub use blame::BlameLine;
 pub use snapshot::{SnapshotCache, head_snapshot};
+pub use volatility::{FileChurn, volatility};
 pub use walk::timeline;
 
 use anyhow::{Context, Result, anyhow};

@@ -33,6 +33,9 @@ cargo install tenetui
 tenetui <repo> <file>
 # e.g. from inside a checkout:
 tenetui . src/main.rs
+
+# omit the file to open the volatile-files overview and pick one:
+tenetui .
 ```
 
 Scrub with `h`/`l`, press `space` to play, `?` for the full key list. That's it.

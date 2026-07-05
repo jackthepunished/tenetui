@@ -4,6 +4,7 @@
 
 mod filepane;
 mod help;
+pub mod overview;
 mod statusbar;
 mod timeline;
 

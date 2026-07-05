@@ -7,19 +7,20 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use git2::{Oid, Repository};
 use ratatui::DefaultTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tenetui::app::{self, AppState, Direction};
 use tenetui::config::Config;
 use tenetui::input::{self, Action, Keymap, SearchAction};
 use tenetui::repo::blame::{BlameRequest, BlameResult};
 use tenetui::repo::{self, SnapshotCache};
 use tenetui::syntax::{HighlightRequest, HighlightResult};
+use tenetui::ui::overview::OverviewState;
 use tenetui::{diff, syntax, theme, ui};
 
 /// Idle poll interval when nothing is playing — just often enough to stay
@@ -28,6 +29,10 @@ const IDLE_POLL: Duration = Duration::from_millis(250);
 
 const ONE_DAY_SECS: i64 = 86_400;
 const ONE_WEEK_SECS: i64 = 7 * ONE_DAY_SECS;
+
+/// Overview scan window and list length — bounded so cold-open stays fast.
+const OVERVIEW_MAX_COMMITS: usize = 500;
+const OVERVIEW_TOP_N: usize = 200;
 
 #[derive(Parser)]
 #[command(
@@ -38,8 +43,8 @@ const ONE_WEEK_SECS: i64 = 7 * ONE_DAY_SECS;
 struct Cli {
     /// Path to the git repository (searched upward, like git).
     repo: PathBuf,
-    /// File within the repository to scrub through its history.
-    file: PathBuf,
+    /// File to scrub. Omit it to open the volatile-files overview and pick one.
+    file: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -56,9 +61,116 @@ fn main() -> Result<()> {
         );
     }
 
-    let rel = repo::relative_path(&repo, &cli.file)?;
-    let timeline = repo::timeline(&repo, &rel)?;
-    let current = repo::head_snapshot(&repo, &rel)?;
+    let config = Config::load();
+    let mut keymap = Keymap::default();
+    keymap.apply_overrides(&config.keybinds);
+    let theme = theme::Theme::new();
+
+    // Resolve the file up front (if given) so a bad path errors before we enter
+    // raw mode. `None` → start at the overview.
+    let initial = match &cli.file {
+        Some(f) => Some(repo::relative_path(&repo, f)?),
+        None => None,
+    };
+    drop(repo);
+
+    // `ratatui::init` enables raw mode, enters the alternate screen, and installs
+    // a panic hook that restores the terminal — so a crash never leaves it broken.
+    let mut terminal = ratatui::init();
+    let result = run_app(&mut terminal, &cli.repo, &config, &keymap, theme, initial);
+    ratatui::restore();
+    result
+}
+
+/// How the overview screen was left.
+enum OverviewExit {
+    Quit,
+    /// Open the player on this repo-relative path.
+    Open(String),
+}
+
+/// Top-level screen loop. With a file it's just the player; without one it's the
+/// overview, opening the player on the chosen file and returning to the overview
+/// when that player quits (so you can pick another file). Each screen opens its
+/// own `Repository` — cheap, and it keeps handles from outliving a screen.
+fn run_app(
+    terminal: &mut DefaultTerminal,
+    repo_path: &Path,
+    config: &Config,
+    keymap: &Keymap,
+    theme: theme::Theme,
+    initial: Option<String>,
+) -> Result<()> {
+    if let Some(rel) = initial {
+        return run_player(terminal, repo_path, config, keymap, theme, &rel);
+    }
+    loop {
+        let repo = repo::open(repo_path)?;
+        let exit = run_overview(terminal, &repo, theme)?;
+        drop(repo);
+        match exit {
+            OverviewExit::Quit => return Ok(()),
+            OverviewExit::Open(rel) => {
+                run_player(terminal, repo_path, config, keymap, theme, &rel)?
+            }
+        }
+    }
+}
+
+/// The volatile-files overview. Its own small input handling (not the player
+/// keymap): `j`/`k` select, `Enter` opens, `q` quits.
+fn run_overview(
+    terminal: &mut DefaultTerminal,
+    repo: &Repository,
+    theme: theme::Theme,
+) -> Result<OverviewExit> {
+    let files = repo::volatility(repo, OVERVIEW_MAX_COMMITS, OVERVIEW_TOP_N)?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let mut state = OverviewState::new(files, theme, now);
+
+    loop {
+        terminal
+            .draw(|frame| ui::overview::render(frame, frame.area(), &state))
+            .context("render failed")?;
+
+        if event::poll(IDLE_POLL)?
+            && let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            match (key.modifiers, key.code) {
+                (KeyModifiers::CONTROL, KeyCode::Char('c'))
+                | (_, KeyCode::Char('q'))
+                | (_, KeyCode::Esc) => return Ok(OverviewExit::Quit),
+                (_, KeyCode::Char('j')) | (_, KeyCode::Down) => state.select_down(),
+                (_, KeyCode::Char('k')) | (_, KeyCode::Up) => state.select_up(),
+                (_, KeyCode::Char('g')) | (_, KeyCode::Home) => state.select_first(),
+                (_, KeyCode::Char('G')) | (_, KeyCode::End) => state.select_last(),
+                (_, KeyCode::Enter) => {
+                    if let Some(path) = state.selected_path() {
+                        return Ok(OverviewExit::Open(path.to_string()));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Build the player state + engine for `rel` and run the event loop until quit.
+fn run_player(
+    terminal: &mut DefaultTerminal,
+    repo_path: &Path,
+    config: &Config,
+    keymap: &Keymap,
+    theme: theme::Theme,
+    rel: &str,
+) -> Result<()> {
+    let repo = repo::open(repo_path)?;
+    let timeline = repo::timeline(&repo, rel)?;
+    let current = repo::head_snapshot(&repo, rel)?;
 
     if timeline.is_empty() && !current.existed {
         anyhow::bail!(
@@ -66,15 +178,11 @@ fn main() -> Result<()> {
         );
     }
 
-    let config = Config::load();
-    let mut keymap = Keymap::default();
-    keymap.apply_overrides(&config.keybinds);
-
-    let mut state = AppState::new(theme::Theme::new(), rel, timeline.clone(), current);
+    let mut state = AppState::new(theme, rel.to_string(), timeline.clone(), current);
     state.speed_ms = config.speed_ms();
     let mut engine = Engine::spawn(
         repo,
-        cli.repo.clone(),
+        repo_path.to_path_buf(),
         timeline,
         state.focused().playhead,
         config.cache_size(),
@@ -84,12 +192,7 @@ fn main() -> Result<()> {
     // frame (~20ms later) via the async worker rather than blocking startup.
     engine.request_highlight(&state, 0);
 
-    // `ratatui::init` enables raw mode, enters the alternate screen, and installs
-    // a panic hook that restores the terminal — so a crash never leaves it broken.
-    let mut terminal = ratatui::init();
-    let result = run(&mut terminal, &mut engine, &keymap, state);
-    ratatui::restore();
-    result
+    run(terminal, &mut engine, keymap, state)
 }
 
 /// The scrub/playback/blame machinery the event loop drives: the main thread's
