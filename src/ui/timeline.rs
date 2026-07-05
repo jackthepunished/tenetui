@@ -10,7 +10,7 @@
 //! "◆" so merge points are identifiable at a glance. Tag takes priority when a
 //! bucket contains both (rare, and tags are the rarer, more significant event).
 
-use crate::app::AppState;
+use crate::app::{AppState, HEAT_MAX};
 use crate::theme::Pole;
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -58,8 +58,21 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         (None, None)
     };
 
+    // Palindrome cold open: columns are revealed from both edges converging
+    // toward the center; unrevealed columns render as a waiting baseline.
+    let reveal = state
+        .intro_fade()
+        .map(|t| (f64::from(t) * w as f64 / 2.0) as usize);
+
     let mut spans: Vec<Span> = Vec::with_capacity(w);
     for x in 0..w {
+        if let Some(r) = reveal
+            && x >= r
+            && x < w.saturating_sub(r)
+        {
+            spans.push(Span::styled("▁", Style::default().fg(th.chrome())));
+            continue;
+        }
         // Pivot markers first, so nothing overwrites the "now" cursor(s).
         if x == fwd_col {
             let pole = if state.pincer {
@@ -92,7 +105,18 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
             .map(|c| c.churn())
             .max()
             .unwrap_or(0);
-        let intensity = bucket_churn as f32 / max_churn;
+        let mut intensity = bucket_churn as f32 / max_churn;
+
+        // Heat echo: a column the playhead recently swept through glows near
+        // its pole's saturated end and cools back over ~10 frames.
+        let heat = (lo..hi)
+            .filter_map(|i| state.heat.get(&i))
+            .max()
+            .copied()
+            .unwrap_or(0);
+        if heat > 0 {
+            intensity = intensity.max(0.95 * f32::from(heat) / f32::from(HEAT_MAX));
+        }
 
         // Direction (hue) relative to the pivot(s). In pincer mode the span
         // *between* the two jaws is neutral steel; outside it, red toward the
@@ -293,5 +317,85 @@ mod tests {
         );
         assert!(is_red_dominant(row[9]), "ahead of the forward jaw is red");
         assert!(is_blue_dominant(row[0]), "behind the inverted jaw is blue");
+    }
+
+    #[test]
+    fn cold_open_reveals_from_both_edges_toward_the_center() {
+        let timeline: Vec<_> = (0..10).map(|_| meta()).collect();
+        let mut state = AppState::new(
+            Theme {
+                depth: ColorDepth::TrueColor,
+            },
+            "f.txt".into(),
+            timeline,
+            Snapshot {
+                oid: Oid::zero(),
+                content: "x
+"
+                .into(),
+                existed: true,
+            },
+        );
+        state.decks[0].playhead = 0;
+        state.intro = crate::app::INTRO_FRAMES / 2; // halfway through the reveal
+
+        let mut terminal = Terminal::new(TestBackend::new(10, 1)).unwrap();
+        terminal
+            .draw(|frame| render(frame, frame.area(), &state))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let syms: Vec<String> = (0..10)
+            .map(|x| buffer[(x, 0)].symbol().to_string())
+            .collect();
+
+        // Middle columns still unrevealed (waiting baseline), edges live.
+        assert_eq!(syms[5], "▁", "center should still be baseline: {syms:?}");
+        // Column 0 is the pivot (playhead 0) — revealed as the full block.
+        assert_eq!(syms[0], "█", "left edge should be revealed: {syms:?}");
+        assert_ne!(syms[9], " ", "right edge should be revealed: {syms:?}");
+    }
+
+    #[test]
+    fn heat_echo_boosts_a_swept_column() {
+        // Column 4 has tiny churn against a high-churn field, so without heat
+        // it renders near-steel — leaving visible headroom for the echo.
+        let timeline: Vec<_> = (0..10)
+            .map(|i| {
+                let mut m = meta();
+                m.insertions = if i == 4 { 1 } else { 40 };
+                m
+            })
+            .collect();
+        let mut state = AppState::new(
+            Theme {
+                depth: ColorDepth::TrueColor,
+            },
+            "f.txt".into(),
+            timeline,
+            Snapshot {
+                oid: Oid::zero(),
+                content: "x
+"
+                .into(),
+                existed: true,
+            },
+        );
+        state.decks[0].playhead = 9;
+
+        let cold = render_row(&state, 10);
+        state.heat.insert(4, crate::app::HEAT_MAX);
+        let hot = render_row(&state, 10);
+
+        // Column 4 (past side, blue) should be much more saturated with heat.
+        let sat = |c: Color| match c {
+            Color::Rgb(r, _, b) => (i16::from(b) - i16::from(r)).abs(),
+            _ => 0,
+        };
+        assert!(
+            sat(hot[4]) > sat(cold[4]) + 40,
+            "heat should visibly boost saturation: cold={:?} hot={:?}",
+            cold[4],
+            hot[4]
+        );
     }
 }

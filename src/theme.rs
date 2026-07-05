@@ -187,6 +187,12 @@ impl Theme {
         self.quantize(oklab_lerp(STEEL, glow, decay.clamp(0.0, 1.0)))
     }
 
+    /// Cold-open fade: text color at fade progress `t` (0 = barely-there dim,
+    /// 1 = the normal steel foreground). Used only during the intro animation.
+    pub fn fade(&self, t: f32) -> Color {
+        self.quantize(oklab_lerp(STEEL_DIM, STEEL, t.clamp(0.0, 1.0)))
+    }
+
     /// Quantize an arbitrary sRGB triple to the terminal capability. The
     /// highlighter uses this to route `syntect`'s resolved token colors through
     /// the same truecolor→256→16 fallback as every other color in the app.

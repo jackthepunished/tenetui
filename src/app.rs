@@ -9,7 +9,7 @@ use crate::input::Action;
 use crate::repo::{BlameLine, CommitMeta, Snapshot};
 use crate::syntax::Highlighted;
 use crate::theme::Theme;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 /// Default playback cadence: one commit every 250ms.
 const DEFAULT_TICK_MS: u64 = 250;
@@ -18,6 +18,15 @@ const MAX_TICK_MS: u64 = 2000;
 
 /// Lines of context kept above a freshly changed region when auto-scroll follows it.
 const FOLLOW_MARGIN: usize = 3;
+
+/// Cold-open animation length in ~33ms frames (the palindrome pincer reveal).
+pub const INTRO_FRAMES: u8 = 24;
+/// Turnstile flip length in frames — the brief hue wash when direction reverses.
+pub const TURNSTILE_FRAMES: u8 = 4;
+/// Timeline heat-echo: frames a just-left playhead column stays hot.
+pub const HEAT_MAX: u8 = 10;
+/// Map comet trail: how many recent playhead positions are remembered.
+const TRAIL_LEN: usize = 8;
 
 /// Which way the playhead last moved — sets the ghost-glow hue (forward = red,
 /// inverted = blue) and which way playback continues when `space` is pressed.
@@ -54,6 +63,11 @@ pub struct Deck {
     /// line range *in this deck's snapshot* — or `None` if it isn't present here.
     /// Only meaningful while `AppState::scope` is set.
     pub scope_range: Option<(usize, usize)>,
+    /// Turnstile frames remaining — set when this deck's direction reverses; the
+    /// pane briefly washes in the new direction's hue while it decays.
+    pub turnstile: u8,
+    /// Recent playhead positions, newest first — the map's comet trail.
+    pub trail: VecDeque<usize>,
 }
 
 impl Deck {
@@ -67,6 +81,8 @@ impl Deck {
             scroll_target: 0,
             highlighted: None,
             scope_range: None,
+            turnstile: 0,
+            trail: VecDeque::new(),
         }
     }
 
@@ -119,6 +135,12 @@ pub struct AppState {
     pub help_visible: bool,
     /// Whether the space-time map view is showing instead of the file pane(s).
     pub map_visible: bool,
+    /// Cold-open frames remaining; any key skips it. 0 = not running (the
+    /// default, so tests and mid-session states render normally).
+    pub intro: u8,
+    /// Timeline heat-echo: commit index → frames of afterglow remaining, seeded
+    /// each time the playhead leaves a position.
+    pub heat: HashMap<usize, u8>,
     /// `Some(name)` while scoped to a function (`arepo`): the file pane clamps to
     /// that function's range in each snapshot. `None` = whole-file view.
     pub scope: Option<String>,
@@ -162,6 +184,8 @@ impl AppState {
             search: None,
             help_visible: false,
             map_visible: false,
+            intro: 0,
+            heat: HashMap::new(),
             scope: None,
             picker: None,
             should_quit: false,
@@ -194,6 +218,32 @@ impl AppState {
             .map(|c| c.path.as_str())
             .unwrap_or(&self.file_path)
     }
+
+    /// Whether any decaying animation is running — the event loop shortens its
+    /// poll timeout to ~30ms while this is true so effects play smoothly.
+    /// (The map trail is position-indexed, not timed, so it doesn't count.)
+    pub fn animating(&self) -> bool {
+        self.intro > 0 || !self.heat.is_empty() || self.decks.iter().any(|d| d.turnstile > 0)
+    }
+
+    /// Cold-open progress as a fade fraction (0 = just started, 1 ≈ done), or
+    /// `None` when the intro isn't running.
+    pub fn intro_fade(&self) -> Option<f32> {
+        (self.intro > 0).then(|| 1.0 - f32::from(self.intro) / f32::from(INTRO_FRAMES))
+    }
+}
+
+/// Advance every decaying animation by one frame. Called by the event loop on
+/// its animation tick; pure state arithmetic.
+pub fn anim_tick(state: &mut AppState) {
+    state.intro = state.intro.saturating_sub(1);
+    for deck in &mut state.decks {
+        deck.turnstile = deck.turnstile.saturating_sub(1);
+    }
+    state.heat.retain(|_, v| {
+        *v = v.saturating_sub(1);
+        *v > 0
+    });
 }
 
 /// The one place state changes in response to an [`Action`].
@@ -309,6 +359,15 @@ pub fn set_playhead(
     debug_assert!(index < state.timeline.len().max(1));
     {
         let d = &mut state.decks[deck];
+        // Motion bookkeeping: the position being left behind echoes on the
+        // timeline (heat) and joins the map's comet trail; a direction reversal
+        // arms the turnstile flip.
+        state.heat.insert(d.playhead, HEAT_MAX);
+        d.trail.push_front(d.playhead);
+        d.trail.truncate(TRAIL_LEN);
+        if d.direction != direction {
+            d.turnstile = TURNSTILE_FRAMES;
+        }
         d.playhead = index;
         d.current = snapshot;
         d.direction = direction;
@@ -816,5 +875,74 @@ mod tests {
         }
         assert_eq!(state.decks[0].scroll, 9);
         assert_eq!(state.decks[1].scroll, 6);
+    }
+
+    #[test]
+    fn set_playhead_seeds_heat_trail_and_turnstile_on_reversal() {
+        let mut state = state_with(vec![commit("A"), commit("B"), commit("C")]);
+        // Forward move first (2 -> can't go up; start by moving to 1 backward).
+        set_playhead(
+            &mut state,
+            0,
+            1,
+            snapshot(
+                "x
+",
+            ),
+            HashMap::new(),
+            Direction::Backward,
+        );
+        // Old playhead (2) echoes on the timeline and joins the trail; the
+        // direction flipped from the default Forward, so the turnstile arms.
+        assert_eq!(state.heat.get(&2), Some(&HEAT_MAX));
+        assert_eq!(state.decks[0].trail.front(), Some(&2));
+        assert_eq!(state.decks[0].turnstile, TURNSTILE_FRAMES);
+
+        // Same-direction move: no new turnstile once the old one is cleared.
+        state.decks[0].turnstile = 0;
+        set_playhead(
+            &mut state,
+            0,
+            0,
+            snapshot(
+                "y
+",
+            ),
+            HashMap::new(),
+            Direction::Backward,
+        );
+        assert_eq!(state.decks[0].turnstile, 0);
+        assert_eq!(state.decks[0].trail.front(), Some(&1));
+    }
+
+    #[test]
+    fn anim_tick_decays_intro_turnstile_and_heat() {
+        let mut state = state_with(vec![commit("A")]);
+        state.intro = 2;
+        state.decks[0].turnstile = 1;
+        state.heat.insert(0, 1);
+        assert!(state.animating());
+
+        anim_tick(&mut state);
+        assert_eq!(state.intro, 1);
+        assert_eq!(state.decks[0].turnstile, 0);
+        assert!(state.heat.is_empty(), "heat at 0 must be dropped");
+
+        anim_tick(&mut state);
+        assert_eq!(state.intro, 0);
+        assert!(!state.animating());
+    }
+
+    #[test]
+    fn intro_fade_progress_runs_zero_to_one_then_none() {
+        let mut state = state_with(vec![commit("A")]);
+        assert_eq!(state.intro_fade(), None);
+        state.intro = INTRO_FRAMES;
+        assert_eq!(state.intro_fade(), Some(0.0));
+        state.intro = 1;
+        let t = state.intro_fade().unwrap();
+        assert!(t > 0.9 && t < 1.0, "{t}");
+        state.intro = 0;
+        assert_eq!(state.intro_fade(), None);
     }
 }

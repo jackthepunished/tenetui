@@ -86,9 +86,12 @@ fn render_deck(frame: &mut Frame, area: Rect, state: &AppState, deck: usize) {
         area,
         &state.decks[deck],
         &state.theme,
-        show_blame,
-        blame,
-        state.scope.is_some(),
+        filepane::PaneView {
+            show_blame,
+            blame,
+            scoped: state.scope.is_some(),
+            fade: state.intro_fade(),
+        },
     );
 }
 

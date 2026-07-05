@@ -84,6 +84,14 @@ x = "quit"
 A missing file or a bad value falls back to defaults with a warning — the config
 never stops the app.
 
+## Motion
+
+Everything that moves means something: the cold open converges from both ends
+of the timeline (TENET is a palindrome), reversing direction plays a brief
+turnstile flip in the new direction's hue, playback leaves a heat trail on the
+timeline and a comet trail on the map — and every effect is pure color math
+that decays in a few frames. Press `?` and check the bottom of the overlay.
+
 ## The look
 
 The aesthetic is drawn from the film. In *Tenet*, Christopher Nolan color-codes

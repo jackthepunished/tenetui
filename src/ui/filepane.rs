@@ -40,21 +40,33 @@ fn placeholder(th: &Theme, msg: &str) -> Paragraph<'static> {
     .wrap(Wrap { trim: true })
 }
 
-/// Render one deck into `area`. `show_blame` toggles the blame gutter; `blame`
-/// is that deck's resolved blame (only the focused deck has it — `None` renders
-/// a blank gutter while the async result is in flight). When `scoped`, the pane
-/// clamps to `deck.scope_range` (a function), or shows a placeholder if that
-/// function is absent at this commit.
-pub fn render(
-    frame: &mut Frame,
-    area: Rect,
-    deck: &Deck,
-    theme: &Theme,
-    show_blame: bool,
-    blame: Option<&[BlameLine]>,
-    scoped: bool,
-) {
+/// Presentation flags for one pane render, bundled so the signature stays flat.
+#[derive(Default)]
+pub struct PaneView<'a> {
+    /// Show the blame gutter (the focused deck only).
+    pub show_blame: bool,
+    /// That deck's resolved blame; `None` renders a blank gutter while the
+    /// async result is in flight.
+    pub blame: Option<&'a [BlameLine]>,
+    /// Clamp to `deck.scope_range` (a function), with a placeholder where the
+    /// function is absent at this commit.
+    pub scoped: bool,
+    /// Cold-open progress: while `Some(t)` text renders on a dim-to-steel ramp
+    /// and full color arrives when the intro ends.
+    pub fade: Option<f32>,
+}
+
+/// Render one deck into `area` under `view`'s presentation flags. A non-zero
+/// `deck.turnstile` briefly washes the pane in the new direction's hue — the
+/// flip through the machine.
+pub fn render(frame: &mut Frame, area: Rect, deck: &Deck, theme: &Theme, view: PaneView) {
     let th = theme;
+    let PaneView {
+        show_blame,
+        blame,
+        scoped,
+        fade,
+    } = view;
 
     // "The file didn't exist here" is a state, not an error.
     if !deck.current.existed {
@@ -126,19 +138,35 @@ pub fn render(
                 gutter,
             ));
 
-            // A ghosting line glows in one direction color, overriding syntax —
-            // the comet trail must read as red/blue. Otherwise use syntax colors
-            // if we have them, else the plain foreground.
-            match (
-                deck.ghosts.contains_key(&i),
-                deck.highlighted.as_ref().and_then(|h| h.get(i)),
-            ) {
-                (false, Some(runs)) if !runs.is_empty() => {
-                    for (piece, color) in runs {
-                        spans.push(Span::styled(piece.clone(), Style::default().fg(*color)));
+            // Precedence: cold-open fade > turnstile wash > ghost glow >
+            // syntax > plain. The first two are transient whole-pane states,
+            // so they may override syntax color for a few frames.
+            if let Some(t) = fade {
+                spans.push(Span::styled(
+                    text.to_string(),
+                    Style::default().fg(th.fade(t)),
+                ));
+            } else if deck.turnstile > 0 {
+                let frac = f32::from(deck.turnstile) / f32::from(crate::app::TURNSTILE_FRAMES);
+                spans.push(Span::styled(
+                    text.to_string(),
+                    Style::default().fg(th.ghost(ghost_pole, 0.20 + 0.35 * frac)),
+                ));
+            } else {
+                // A ghosting line glows in one direction color, overriding
+                // syntax — the comet trail must read as red/blue. Otherwise
+                // use syntax colors if we have them, else plain foreground.
+                match (
+                    deck.ghosts.contains_key(&i),
+                    deck.highlighted.as_ref().and_then(|h| h.get(i)),
+                ) {
+                    (false, Some(runs)) if !runs.is_empty() => {
+                        for (piece, color) in runs {
+                            spans.push(Span::styled(piece.clone(), Style::default().fg(*color)));
+                        }
                     }
+                    _ => spans.push(Span::styled(text.to_string(), text_style)),
                 }
-                _ => spans.push(Span::styled(text.to_string(), text_style)),
             }
             Line::from(spans)
         })
@@ -189,7 +217,7 @@ mod tests {
     fn fg_at(deck: &Deck, row: u16) -> Color {
         let mut terminal = Terminal::new(TestBackend::new(20, 3)).unwrap();
         terminal
-            .draw(|frame| render(frame, frame.area(), deck, &theme(), false, None, false))
+            .draw(|frame| render(frame, frame.area(), deck, &theme(), PaneView::default()))
             .unwrap();
         terminal.backend().buffer()[(2, row)].fg
     }
@@ -227,7 +255,19 @@ mod tests {
     fn blame_row_text(deck: &Deck, blame: Option<&[BlameLine]>, row: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(40, 3)).unwrap();
         terminal
-            .draw(|frame| render(frame, frame.area(), deck, &theme(), true, blame, false))
+            .draw(|frame| {
+                render(
+                    frame,
+                    frame.area(),
+                    deck,
+                    &theme(),
+                    PaneView {
+                        show_blame: true,
+                        blame,
+                        ..PaneView::default()
+                    },
+                )
+            })
             .unwrap();
         let buffer = terminal.backend().buffer();
         (0..40)
@@ -276,7 +316,7 @@ mod tests {
         // With the gutter off, the text column starts right after "N ".
         let mut terminal = Terminal::new(TestBackend::new(40, 3)).unwrap();
         terminal
-            .draw(|frame| render(frame, frame.area(), &deck, &theme(), false, None, false))
+            .draw(|frame| render(frame, frame.area(), &deck, &theme(), PaneView::default()))
             .unwrap();
         let buffer = terminal.backend().buffer();
         let row0: String = (0..40)
@@ -298,7 +338,7 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(20, 3)).unwrap();
         terminal
-            .draw(|frame| render(frame, frame.area(), &deck, &theme(), false, None, false))
+            .draw(|frame| render(frame, frame.area(), &deck, &theme(), PaneView::default()))
             .unwrap();
         let buffer = terminal.backend().buffer();
         // "1 " gutter is 2 cells; "o","n" get color a, "e" gets color b.
@@ -320,7 +360,7 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(20, 3)).unwrap();
         terminal
-            .draw(|frame| render(frame, frame.area(), &deck, &theme(), false, None, false))
+            .draw(|frame| render(frame, frame.area(), &deck, &theme(), PaneView::default()))
             .unwrap();
         let buffer = terminal.backend().buffer();
         let cell = buffer[(2, 1)].fg;
@@ -334,7 +374,18 @@ mod tests {
     fn full_text(deck: &Deck, scoped: bool) -> String {
         let mut terminal = Terminal::new(TestBackend::new(24, 6)).unwrap();
         terminal
-            .draw(|frame| render(frame, frame.area(), deck, &theme(), false, None, scoped))
+            .draw(|frame| {
+                render(
+                    frame,
+                    frame.area(),
+                    deck,
+                    &theme(),
+                    PaneView {
+                        scoped,
+                        ..PaneView::default()
+                    },
+                )
+            })
             .unwrap();
         let buffer = terminal.backend().buffer();
         (0..6)
@@ -370,5 +421,68 @@ mod tests {
         // "exist" is a single word, so line-wrap padding can't split it.
         assert!(text.contains("exist"), "{text}");
         assert!(!text.contains("1 a"), "{text}");
+    }
+
+    #[test]
+    fn cold_open_fade_dims_text_then_normal_color_returns() {
+        let deck = deck_with(
+            "one
+two
+three
+",
+        );
+        let normal = fg_at(&deck, 0);
+
+        // fade at t=0: dimmer than the normal foreground (compare luminance).
+        let mut terminal = Terminal::new(TestBackend::new(20, 3)).unwrap();
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    frame.area(),
+                    &deck,
+                    &theme(),
+                    PaneView {
+                        fade: Some(0.0),
+                        ..PaneView::default()
+                    },
+                )
+            })
+            .unwrap();
+        let faded = terminal.backend().buffer()[(2, 0)].fg;
+
+        let luma = |c: Color| match c {
+            Color::Rgb(r, g, b) => u32::from(r) + u32::from(g) + u32::from(b),
+            _ => 0,
+        };
+        assert!(
+            luma(faded) < luma(normal),
+            "fade(0) should be dimmer: {faded:?} vs {normal:?}"
+        );
+    }
+
+    #[test]
+    fn turnstile_washes_the_pane_in_the_new_direction_hue() {
+        let mut deck = deck_with(
+            "one
+two
+three
+",
+        );
+        deck.direction = Direction::Forward;
+        deck.turnstile = crate::app::TURNSTILE_FRAMES;
+
+        let washed = fg_at(&deck, 0); // line 0 has no ghost; wash must color it
+        assert!(
+            matches!(washed, Color::Rgb(r, _, b) if r > b),
+            "forward turnstile should wash red: {washed:?}"
+        );
+
+        deck.turnstile = 0;
+        let after = fg_at(&deck, 0);
+        assert!(
+            matches!(after, Color::Rgb(r, _, b) if r == b || (i16::from(r) - i16::from(b)).abs() < 40),
+            "wash should clear when the turnstile finishes: {after:?}"
+        );
     }
 }

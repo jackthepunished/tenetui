@@ -61,3 +61,15 @@ Milestones are ordered; each produces something runnable. Claude Code: tick chec
 
 **Accept:** the map re-anchors live while scrubbing/playing; everything on it is real data in the Tenet palette.
 
+## M7 — Motion pack (post-v1)
+
+- [x] Palindrome cold open: the timeline reveals from both edges converging toward the center while the file fades in from steel; any key skips it (whitepaper "Motion & motifs", finally built)
+- [x] Turnstile flip: reversing scrub direction washes the pane in the new direction's hue for ~4 frames (whitepaper "Motion & motifs")
+- [x] Timeline heat-echo: columns the playhead just swept through glow toward their pole's saturated end and cool over ~10 frames
+- [x] Map comet trail: the pivot's recent positions fade behind it in the space-time map
+- [x] SATOR square watermark in the help overlay
+- [ ] Word-level ghosting (changed words hot, rest of line half-glow)
+- [ ] Dual-pivot pincer map
+
+**Accept:** playback and scrubbing visibly *move* — trails, echoes, and flips all decay smoothly at ~30fps with zero I/O per frame.
+

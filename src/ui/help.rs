@@ -38,6 +38,22 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, keymap: &Keymap) 
         ]));
     }
 
+    // The SATOR square — the palindrome the film's title comes from, and the
+    // source of this project's commit names. A quiet watermark in steel.
+    lines.push(Line::from(""));
+    for row in [
+        "S A T O R",
+        "A R E P O",
+        "T E N E T",
+        "O P E R A",
+        "R O T A S",
+    ] {
+        lines.push(Line::from(Span::styled(
+            format!("{row:^42}"),
+            Style::default().fg(th.chrome()),
+        )));
+    }
+
     // +2 for the border rows; the modal is as tall as its content needs.
     let height = (lines.len() as u16) + 2;
     let rect = centered(area, WIDTH, height);
@@ -122,5 +138,7 @@ mod tests {
         assert!(text.contains("scrub forward"), "description missing");
         // A rebindable key label shows up (space for play/pause).
         assert!(text.contains("space"), "key label missing");
+        // The SATOR square watermark.
+        assert!(text.contains("T E N E T"), "SATOR square missing");
     }
 }

@@ -154,6 +154,22 @@ fn paint(ctx: &mut Context, state: &AppState) {
         );
     }
 
+    // Comet trail: where "now" recently was, fading with age. Positions are
+    // re-projected against the *current* playhead, so the trail reads as the
+    // path the pivot took through today's field.
+    let trail = &state.focused().trail;
+    for (age, &idx) in trail.iter().enumerate() {
+        if idx == playhead {
+            continue;
+        }
+        let frac = 1.0 - (age as f32 / trail.len().max(1) as f32);
+        let (x, y) = node_pos(idx, playhead, max_dist);
+        ctx.draw(&Points {
+            coords: &[(x, y), (x + 0.014, y), (x - 0.014, y)],
+            color: th.timeline_cell(Pole::Pivot, 0.25 + 0.6 * frac),
+        });
+    }
+
     // The white-hot pivot: "you are here".
     pivot(ctx, th);
     if let Some(commit) = state.current_commit() {

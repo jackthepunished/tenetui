@@ -27,6 +27,10 @@ use tenetui::{diff, functions, syntax, theme, ui};
 /// responsive to terminal resizes.
 const IDLE_POLL: Duration = Duration::from_millis(250);
 
+/// Poll interval while a decaying animation (intro, turnstile, heat echo) is
+/// running — ~30fps, the same one-tick-source pattern playback uses.
+const ANIM_POLL: Duration = Duration::from_millis(33);
+
 const ONE_DAY_SECS: i64 = 86_400;
 const ONE_WEEK_SECS: i64 = 7 * ONE_DAY_SECS;
 
@@ -191,6 +195,10 @@ fn run_player(
     // Kick off highlighting of the initial HEAD snapshot; it lands on an early
     // frame (~20ms later) via the async worker rather than blocking startup.
     engine.request_highlight(&state, 0);
+
+    // The palindrome cold open: the timeline converges from both ends and the
+    // file fades in. Any key skips it.
+    state.intro = app::INTRO_FRAMES;
 
     run(terminal, &mut engine, keymap, state)
 }
@@ -440,6 +448,8 @@ fn run(
         // with no key event means it's time to advance one more commit.
         let poll_timeout = if state.playing {
             Duration::from_millis(state.speed_ms)
+        } else if state.animating() {
+            ANIM_POLL
         } else {
             IDLE_POLL
         };
@@ -450,6 +460,8 @@ fn run(
             if let Event::Key(key) = event::read()?
                 && key.kind == KeyEventKind::Press
             {
+                // Any key skips the cold open.
+                state.intro = 0;
                 if state.help_visible {
                     // Modal: only `?` (ToggleHelp) or Esc closes it; the app's
                     // Esc→quit binding is suppressed while help is up.
@@ -483,6 +495,10 @@ fn run(
                 // Ran off the end (or start) of history — nothing left to play.
                 state.playing = false;
             }
+            app::anim_tick(&mut state);
+        } else if state.animating() {
+            // No key, not playing: this timeout is purely an animation frame.
+            app::anim_tick(&mut state);
         }
     }
     Ok(())
