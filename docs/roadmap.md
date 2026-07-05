@@ -51,4 +51,4 @@ Milestones are ordered; each produces something runnable. Claude Code: tick chec
 - [ ] Function-level tracking (`git log -L` equivalent via tree-sitter ranges)
 - [ ] "Volatile files" overview screen: repo-wide churn ranking as entry point
 - [x] Rename following across file moves
-- [ ] Temporal pincer mode: two playheads side-by-side, one scrubbing forward and one inverted, compare eras
+- [x] Temporal pincer mode: two playheads side-by-side, one scrubbing forward and one inverted, compare eras

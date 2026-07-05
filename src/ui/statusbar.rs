@@ -46,9 +46,19 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
 
     let total = state.timeline.len();
     let mut left = vec![Span::styled(
-        format!("{}/{}", state.playhead + 1, total.max(1)),
+        format!("{}/{}", state.focused().playhead + 1, total.max(1)),
         Style::default().fg(th.pivot()),
     )];
+
+    // In pincer mode, name which pane has focus (and thus what h/l scrubs).
+    if state.pincer {
+        let (label, color) = match state.focused().direction {
+            Direction::Forward => ("▶ forward", th.forward()),
+            Direction::Backward => ("◀ inverted", th.inverted()),
+        };
+        left.push(sep());
+        left.push(Span::styled(label, Style::default().fg(color)));
+    }
 
     if let Some(commit) = state.current_commit() {
         left.push(sep());
@@ -79,20 +89,26 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     }
 
     let hint = if state.playing {
-        let (arrow, label, color) = match state.direction {
-            Direction::Forward => ("▶", "forward", th.forward()),
-            Direction::Backward => ("◀", "inverted", th.inverted()),
+        let (label, color) = if state.pincer {
+            ("⇄ pincer", th.pivot())
+        } else {
+            match state.focused().direction {
+                Direction::Forward => ("▶ forward", th.forward()),
+                Direction::Backward => ("◀ inverted", th.inverted()),
+            }
         };
         Line::from(vec![
-            Span::styled(
-                format!("{arrow} playing {label}"),
-                Style::default().fg(color),
-            ),
+            Span::styled(format!("{label} playing"), Style::default().fg(color)),
             Span::styled("  ·  space pause", Style::default().fg(th.chrome())),
         ])
+    } else if state.pincer {
+        Line::from(Span::styled(
+            "h/l scrub · tab focus · space pincer · t exit · ? help",
+            Style::default().fg(th.chrome()),
+        ))
     } else {
         Line::from(Span::styled(
-            "h/l scrub · space play · B blame · / search · ? help",
+            "h/l scrub · space play · t pincer · B blame · / search · ? help",
             Style::default().fg(th.chrome()),
         ))
     };

@@ -47,16 +47,36 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         .unwrap_or(1)
         .max(1) as f32;
 
-    // The column the playhead lands on, so we can plant the white pivot marker.
-    let playhead_col = (state.playhead * w) / n;
+    // Pivot columns. In pincer mode there are two — deck 0 forward (red-hot) and
+    // deck 1 inverted (blue-hot); otherwise the single playhead is a white pivot.
+    let fwd_playhead = state.decks[0].playhead;
+    let fwd_col = (fwd_playhead * w) / n;
+    let (inv_playhead, inv_col) = if state.pincer && state.decks.len() > 1 {
+        let p = state.decks[1].playhead;
+        (Some(p), Some((p * w) / n))
+    } else {
+        (None, None)
+    };
 
     let mut spans: Vec<Span> = Vec::with_capacity(w);
     for x in 0..w {
-        if x == playhead_col {
-            // The "now" cursor: a white-hot pivot block.
+        // Pivot markers first, so nothing overwrites the "now" cursor(s).
+        if x == fwd_col {
+            let pole = if state.pincer {
+                Pole::Future
+            } else {
+                Pole::Pivot
+            };
             spans.push(Span::styled(
                 "█",
-                Style::default().fg(th.timeline_cell(Pole::Pivot, 1.0)),
+                Style::default().fg(th.timeline_cell(pole, 1.0)),
+            ));
+            continue;
+        }
+        if inv_col == Some(x) {
+            spans.push(Span::styled(
+                "█",
+                Style::default().fg(th.timeline_cell(Pole::Past, 1.0)),
             ));
             continue;
         }
@@ -65,6 +85,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         // n>w by bucketing — same formula.)
         let lo = (x * n) / w;
         let hi = (((x + 1) * n) / w).max(lo + 1).min(n);
+        let center = (lo + hi) / 2;
 
         let bucket_churn = state.timeline[lo..hi]
             .iter()
@@ -73,12 +94,27 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
             .unwrap_or(0);
         let intensity = bucket_churn as f32 / max_churn;
 
-        // Direction relative to the playhead: earlier = past/blue, later = future/red.
-        let center = (lo + hi) / 2;
-        let pole = if center < state.playhead {
-            Pole::Past
-        } else {
-            Pole::Future
+        // Direction (hue) relative to the pivot(s). In pincer mode the span
+        // *between* the two jaws is neutral steel; outside it, red toward the
+        // future (past deck 0) and blue toward the past (past deck 1).
+        let color = match inv_playhead {
+            Some(inv) => {
+                if center > fwd_playhead {
+                    th.timeline_cell(Pole::Future, intensity)
+                } else if center < inv {
+                    th.timeline_cell(Pole::Past, intensity)
+                } else {
+                    th.chrome()
+                }
+            }
+            None => {
+                let pole = if center < fwd_playhead {
+                    Pole::Past
+                } else {
+                    Pole::Future
+                };
+                th.timeline_cell(pole, intensity)
+            }
         };
 
         let bucket = &state.timeline[lo..hi];
@@ -88,16 +124,10 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
                 Style::default().fg(th.timeline_cell(Pole::Pivot, 1.0)),
             ));
         } else if bucket.iter().any(|c| c.is_merge) {
-            spans.push(Span::styled(
-                "◆",
-                Style::default().fg(th.timeline_cell(pole, intensity)),
-            ));
+            spans.push(Span::styled("◆", Style::default().fg(color)));
         } else {
             let glyph = BLOCKS[((intensity * 7.0).round() as usize).min(7)];
-            spans.push(Span::styled(
-                glyph.to_string(),
-                Style::default().fg(th.timeline_cell(pole, intensity)),
-            ));
+            spans.push(Span::styled(glyph.to_string(), Style::default().fg(color)));
         }
     }
 
@@ -168,13 +198,13 @@ mod tests {
             },
         );
 
-        state.playhead = 2;
+        state.decks[0].playhead = 2;
         let at_2 = render_row(&state, 10);
         assert!(is_blue_dominant(at_2[0]), "before playhead should be blue");
         assert!(is_blue_dominant(at_2[1]), "before playhead should be blue");
         assert!(is_red_dominant(at_2[9]), "after playhead should be red");
 
-        state.playhead = 7;
+        state.decks[0].playhead = 7;
         let at_7 = render_row(&state, 10);
         // Column 2 was on the red/future side of playhead 2; once the playhead
         // sweeps past it to 7, it must flip to blue/past.
@@ -217,7 +247,7 @@ mod tests {
                 existed: true,
             },
         );
-        state.playhead = 0; // keep the pivot off of columns 3/6 so it can't mask them
+        state.decks[0].playhead = 0; // keep the pivot off of columns 3/6 so it can't mask them
 
         let symbols = render_symbols(&state, 10);
         assert_eq!(symbols[3], "▲", "tagged commit should show the tag marker");
@@ -226,5 +256,42 @@ mod tests {
             !BLOCKS.iter().any(|&b| symbols[3] == b.to_string()),
             "tag marker must not be a churn block"
         );
+    }
+
+    #[test]
+    fn pincer_mode_draws_a_red_and_a_blue_pivot() {
+        let timeline: Vec<_> = (0..10).map(|_| meta()).collect();
+        let mut state = AppState::new(
+            Theme {
+                depth: ColorDepth::TrueColor,
+            },
+            "f.txt".into(),
+            timeline,
+            Snapshot {
+                oid: Oid::zero(),
+                content: "x\n".into(),
+                existed: true,
+            },
+        );
+        // Enter pincer with the forward deck ahead (col 7) and inverted behind
+        // (col 2); width == commit count so column index == playhead.
+        state.pincer = true;
+        state.decks.push(state.decks[0].clone());
+        state.decks[0].playhead = 7; // forward, red
+        state.decks[1].playhead = 2; // inverted, blue
+
+        let row = render_row(&state, 10);
+        assert!(
+            is_red_dominant(row[7]),
+            "forward pivot should be red: {:?}",
+            row[7]
+        );
+        assert!(
+            is_blue_dominant(row[2]),
+            "inverted pivot should be blue: {:?}",
+            row[2]
+        );
+        assert!(is_red_dominant(row[9]), "ahead of the forward jaw is red");
+        assert!(is_blue_dominant(row[0]), "behind the inverted jaw is blue");
     }
 }

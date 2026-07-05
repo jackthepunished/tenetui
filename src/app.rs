@@ -26,39 +26,85 @@ pub enum Direction {
     Backward,
 }
 
-/// Everything the renderer needs for a frame.
-pub struct AppState {
-    pub theme: Theme,
-    /// Repo-relative path, for display.
-    pub file_path: String,
-    /// Every commit touching the file, oldest → newest. The timeline.
-    pub timeline: Vec<CommitMeta>,
-    /// Index into `timeline` of the "now" cursor. M0 pins it to HEAD (last).
+/// One playhead and everything that hangs off it. In normal use there's a
+/// single deck; the temporal pincer (`sator`) activates a second one so the
+/// forward-red and inverted-blue panes each have independent position, ghost
+/// trail, scroll, and highlighting.
+#[derive(Clone)]
+pub struct Deck {
+    /// Index into `AppState::timeline` of this deck's "now" cursor.
     pub playhead: usize,
     /// The file as it existed at `playhead`.
     pub current: Snapshot,
-    /// Lines changed by the last transition, decaying toward zero. Keyed by
-    /// 0-indexed line number in `current`. See `diff::compute_ghosts`.
+    /// Lines changed by the last transition, decaying toward zero (0-indexed
+    /// line in `current`). See `diff::compute_ghosts`.
     pub ghosts: HashMap<usize, u8>,
-    /// Which way the playhead last moved; sets ghost hue and playback direction.
+    /// Which way this deck last moved; sets its ghost hue. In pincer mode each
+    /// deck's direction is fixed by its role (deck 0 forward, deck 1 inverted).
     pub direction: Direction,
+    /// Vertical scroll offset into the pane, as currently rendered.
+    pub scroll: u16,
+    /// Where `scroll` is easing toward. See [`ease_scroll`].
+    pub scroll_target: u16,
+    /// Syntax highlighting for `current`, one entry per line, or `None` when the
+    /// file type is unknown, the snapshot is absent, or a move just cleared it.
+    pub highlighted: Option<Highlighted>,
+}
+
+impl Deck {
+    fn new(playhead: usize, current: Snapshot) -> Self {
+        Deck {
+            playhead,
+            current,
+            ghosts: HashMap::new(),
+            direction: Direction::Forward,
+            scroll: 0,
+            scroll_target: 0,
+            highlighted: None,
+        }
+    }
+
+    /// Upper bound for `scroll` so we never scroll the file entirely off-screen.
+    pub fn max_scroll(&self) -> u16 {
+        u16::try_from(self.current.line_count().saturating_sub(1)).unwrap_or(u16::MAX)
+    }
+
+    /// A blank deck for widget tests in other modules.
+    #[cfg(test)]
+    pub fn new_for_test() -> Deck {
+        Deck::new(
+            0,
+            Snapshot {
+                oid: git2::Oid::zero(),
+                content: "".into(),
+                existed: true,
+            },
+        )
+    }
+}
+
+/// Everything the renderer needs for a frame.
+pub struct AppState {
+    pub theme: Theme,
+    /// Repo-relative path at HEAD, for display fallback and error messages.
+    pub file_path: String,
+    /// Every commit touching the file, oldest → newest. The timeline.
+    pub timeline: Vec<CommitMeta>,
+    /// One deck in normal mode; two in pincer mode (0 = forward, 1 = inverted).
+    pub decks: Vec<Deck>,
+    /// Which deck has keyboard focus (0 or 1). Manual scrub/scroll act on it,
+    /// and blame follows it.
+    pub focus: usize,
+    /// Whether the temporal pincer (two decks) is active.
+    pub pincer: bool,
     pub playing: bool,
     /// Milliseconds per commit during playback.
     pub speed_ms: u64,
-    /// Vertical scroll offset into the file pane, as currently rendered.
-    pub scroll: u16,
-    /// Where `scroll` is easing toward — set by a transition's changed region,
-    /// or snapped to `scroll` itself by manual scrolling. See [`ease_scroll`].
-    pub scroll_target: u16,
-    /// Syntax highlighting for `current`, one entry per line, or `None` when the
-    /// file type is unknown or the snapshot doesn't exist. Recomputed off the
-    /// render path whenever the playhead moves (see `main`'s `jump_to`).
-    pub highlighted: Option<Highlighted>,
     /// Whether the blame gutter is toggled on.
     pub blame_visible: bool,
-    /// Author + age per line at `playhead`, once the background blame worker
-    /// delivers it. `None` while hidden, still computing, or just invalidated
-    /// by a move (see docs/architecture.md "Blame": invalidated on move).
+    /// Author + age per line at the *focused* deck's playhead, once the
+    /// background worker delivers it. `None` while hidden, computing, or just
+    /// invalidated by a move (docs/architecture.md "Blame": invalidated on move).
     pub blame: Option<Vec<BlameLine>>,
     /// `Some(query)` while in `/`-search mode; typed characters build the query
     /// in place. `None` in normal navigation mode.
@@ -80,15 +126,11 @@ impl AppState {
             theme,
             file_path,
             timeline,
-            playhead,
-            current,
-            ghosts: HashMap::new(),
-            direction: Direction::Forward,
+            decks: vec![Deck::new(playhead, current)],
+            focus: 0,
+            pincer: false,
             playing: false,
             speed_ms: DEFAULT_TICK_MS,
-            scroll: 0,
-            scroll_target: 0,
-            highlighted: None,
             blame_visible: false,
             blame: None,
             search: None,
@@ -97,23 +139,31 @@ impl AppState {
         }
     }
 
-    /// The commit at the playhead, if the timeline is non-empty.
-    pub fn current_commit(&self) -> Option<&CommitMeta> {
-        self.timeline.get(self.playhead)
+    /// The deck with keyboard focus.
+    pub fn focused(&self) -> &Deck {
+        &self.decks[self.focus]
     }
 
-    /// The file's path *at the playhead* — the same as `file_path` unless the
-    /// playhead has scrubbed back across a rename, in which case it's the older
-    /// name. Used for the header and for fetching content/blame/highlighting.
+    fn focused_mut(&mut self) -> &mut Deck {
+        &mut self.decks[self.focus]
+    }
+
+    /// The commit at deck `i`'s playhead, if any.
+    pub fn commit_at(&self, deck: usize) -> Option<&CommitMeta> {
+        self.timeline.get(self.decks[deck].playhead)
+    }
+
+    /// The commit at the focused deck's playhead.
+    pub fn current_commit(&self) -> Option<&CommitMeta> {
+        self.commit_at(self.focus)
+    }
+
+    /// The file's path at the focused deck's playhead — the same as `file_path`
+    /// unless scrubbed back across a rename, in which case it's the older name.
     pub fn current_path(&self) -> &str {
         self.current_commit()
             .map(|c| c.path.as_str())
             .unwrap_or(&self.file_path)
-    }
-
-    /// Upper bound for `scroll` so we never scroll the file entirely off-screen.
-    fn max_scroll(&self) -> u16 {
-        u16::try_from(self.current.line_count().saturating_sub(1)).unwrap_or(u16::MAX)
     }
 }
 
@@ -126,20 +176,26 @@ pub fn update(state: &mut AppState, action: Action) {
     match action {
         Action::Quit => state.should_quit = true,
         Action::ScrollDown => {
-            state.scroll = (state.scroll + 1).min(state.max_scroll());
-            state.scroll_target = state.scroll; // manual scroll cancels auto-follow
+            let max = state.focused().max_scroll();
+            let d = state.focused_mut();
+            d.scroll = (d.scroll + 1).min(max);
+            d.scroll_target = d.scroll; // manual scroll cancels auto-follow
         }
         Action::ScrollUp => {
-            state.scroll = state.scroll.saturating_sub(1);
-            state.scroll_target = state.scroll;
+            let d = state.focused_mut();
+            d.scroll = d.scroll.saturating_sub(1);
+            d.scroll_target = d.scroll;
         }
         Action::Top => {
-            state.scroll = 0;
-            state.scroll_target = 0;
+            let d = state.focused_mut();
+            d.scroll = 0;
+            d.scroll_target = 0;
         }
         Action::Bottom => {
-            state.scroll = state.max_scroll();
-            state.scroll_target = state.scroll;
+            let max = state.focused().max_scroll();
+            let d = state.focused_mut();
+            d.scroll = max;
+            d.scroll_target = max;
         }
         // Handled by the caller instead — see the ScrubForward/ScrubBackward doc
         // comment above; the same reasoning applies to every jump/blame variant
@@ -167,6 +223,38 @@ pub fn update(state: &mut AppState, action: Action) {
         }
         Action::SearchStart => search_start(state),
         Action::ToggleHelp => state.help_visible = !state.help_visible,
+        Action::TogglePincer => toggle_pincer(state),
+        Action::ToggleFocus => toggle_focus(state),
+    }
+}
+
+/// Enter or leave temporal pincer mode. Entering clones the focused deck into a
+/// second one and pins the two roles (deck 0 = forward/red, deck 1 =
+/// inverted/blue); leaving drops the second deck. Both start at the current
+/// position so playback fans them apart from a shared "now".
+pub fn toggle_pincer(state: &mut AppState) {
+    if state.pincer {
+        state.decks.truncate(1);
+        state.pincer = false;
+        state.focus = 0;
+        state.decks[0].direction = Direction::Forward;
+    } else {
+        let mut second = state.decks[0].clone();
+        second.direction = Direction::Backward;
+        state.decks[0].direction = Direction::Forward;
+        state.decks.push(second);
+        state.pincer = true;
+        state.focus = 0;
+    }
+    // Blame belongs to the focused deck; a mode change re-scopes it.
+    state.blame = None;
+}
+
+/// Switch keyboard focus between the two decks (no-op outside pincer mode).
+pub fn toggle_focus(state: &mut AppState) {
+    if state.pincer {
+        state.focus = 1 - state.focus;
+        state.blame = None; // blame follows focus
     }
 }
 
@@ -179,24 +267,30 @@ pub fn update(state: &mut AppState, action: Action) {
 /// new target across the next few frames instead of snapping.
 pub fn set_playhead(
     state: &mut AppState,
+    deck: usize,
     index: usize,
     snapshot: Snapshot,
     ghosts: HashMap<usize, u8>,
     direction: Direction,
 ) {
     debug_assert!(index < state.timeline.len().max(1));
-    state.playhead = index;
-    state.current = snapshot;
-    state.direction = direction;
-    // Invalidated on move: the old blame describes the wrong commit now. The
-    // caller re-requests it (see `Engine::jump_to`) if the gutter is visible.
-    state.blame = None;
-    if let Some(top) = diff::freshest_changed_line(&ghosts) {
-        state.scroll_target = u16::try_from(top.saturating_sub(FOLLOW_MARGIN))
-            .unwrap_or(u16::MAX)
-            .min(state.max_scroll());
+    {
+        let d = &mut state.decks[deck];
+        d.playhead = index;
+        d.current = snapshot;
+        d.direction = direction;
+        if let Some(top) = diff::freshest_changed_line(&ghosts) {
+            d.scroll_target = u16::try_from(top.saturating_sub(FOLLOW_MARGIN))
+                .unwrap_or(u16::MAX)
+                .min(d.max_scroll());
+        }
+        d.ghosts = ghosts;
     }
-    state.ghosts = ghosts;
+    // Invalidated on move: the old blame describes the wrong commit now. Only
+    // the focused deck's blame is shown; the caller re-requests it if visible.
+    if deck == state.focus {
+        state.blame = None;
+    }
 }
 
 /// Merge in a blame result the background worker finished computing. The
@@ -206,11 +300,11 @@ pub fn set_blame(state: &mut AppState, lines: Vec<BlameLine>) {
     state.blame = Some(lines);
 }
 
-/// Replace the current snapshot's syntax highlighting. Computed by the caller
-/// (`main`) since it needs the `Highlighter`; kept out of `set_playhead` so the
-/// two are independently testable and highlighting can be swapped/disabled.
-pub fn set_highlighted(state: &mut AppState, highlighted: Option<Highlighted>) {
-    state.highlighted = highlighted;
+/// Replace a deck's syntax highlighting. Computed by the caller (`main`) since
+/// it needs the `Highlighter`; kept out of `set_playhead` so the two are
+/// independently testable and highlighting can be swapped/disabled.
+pub fn set_highlighted(state: &mut AppState, deck: usize, highlighted: Option<Highlighted>) {
+    state.decks[deck].highlighted = highlighted;
 }
 
 /// Enter `/`-search mode with an empty query.
@@ -260,8 +354,9 @@ pub fn search_target(state: &AppState) -> Option<usize> {
     if n == 0 {
         return None;
     }
+    let playhead = state.focused().playhead;
     (1..=n)
-        .map(|offset| (state.playhead + offset) % n)
+        .map(|offset| (playhead + offset) % n)
         .find(|&i| fuzzy_matches(query, &state.timeline[i].summary))
 }
 
@@ -269,44 +364,47 @@ pub fn search_target(state: &AppState) -> Option<usize> {
 /// in the given direction, clamped to the ends of history — the `w`/`b`
 /// (day) and `{`/`}` (week) jump motions.
 pub fn jump_target(state: &AppState, forward: bool, seconds: i64) -> usize {
+    let playhead = state.focused().playhead;
     let Some(current_time) = state.current_commit().map(|c| c.time) else {
-        return state.playhead;
+        return playhead;
     };
     let n = state.timeline.len();
     if forward {
         let target_time = current_time + seconds;
-        (state.playhead + 1..n)
+        (playhead + 1..n)
             .find(|&i| state.timeline[i].time >= target_time)
             .unwrap_or_else(|| n.saturating_sub(1))
     } else {
         let target_time = current_time - seconds;
-        (0..state.playhead)
+        (0..playhead)
             .rev()
             .find(|&i| state.timeline[i].time <= target_time)
             .unwrap_or(0)
     }
 }
 
-/// Nudge `scroll` a fraction of the way toward `scroll_target`, called once per
-/// frame regardless of what triggered it — this is the "eases toward... rather
-/// than snapping" auto-scroll motion from the whitepaper. Pure arithmetic, safe
-/// to call unconditionally; a no-op once `scroll == scroll_target`.
+/// Nudge every deck's `scroll` a fraction of the way toward its `scroll_target`,
+/// called once per frame regardless of what triggered it — the "eases toward...
+/// rather than snapping" auto-scroll from the whitepaper. Pure arithmetic, safe
+/// to call unconditionally; a no-op for a deck already at its target.
 pub fn ease_scroll(state: &mut AppState) {
-    if state.scroll == state.scroll_target {
-        return;
-    }
-    let diff = i32::from(state.scroll_target) - i32::from(state.scroll);
-    let step = (diff.unsigned_abs() / 3).max(1);
-    if diff > 0 {
-        state.scroll = state
-            .scroll
-            .saturating_add(step as u16)
-            .min(state.scroll_target);
-    } else {
-        state.scroll = state
-            .scroll
-            .saturating_sub(step as u16)
-            .max(state.scroll_target);
+    for deck in &mut state.decks {
+        if deck.scroll == deck.scroll_target {
+            continue;
+        }
+        let diff = i32::from(deck.scroll_target) - i32::from(deck.scroll);
+        let step = (diff.unsigned_abs() / 3).max(1);
+        if diff > 0 {
+            deck.scroll = deck
+                .scroll
+                .saturating_add(step as u16)
+                .min(deck.scroll_target);
+        } else {
+            deck.scroll = deck
+                .scroll
+                .saturating_sub(step as u16)
+                .max(deck.scroll_target);
+        }
     }
 }
 
@@ -356,7 +454,7 @@ mod tests {
     #[test]
     fn new_pins_playhead_to_head() {
         let state = state_with(vec![commit("A"), commit("B"), commit("C")]);
-        assert_eq!(state.playhead, 2);
+        assert_eq!(state.focused().playhead, 2);
         assert_eq!(state.current_commit().unwrap().summary, "C");
     }
 
@@ -366,46 +464,48 @@ mod tests {
         for _ in 0..10 {
             update(&mut state, Action::ScrollDown);
         }
-        assert_eq!(state.scroll, 2); // last line index, not out past it
+        assert_eq!(state.focused().scroll, 2); // last line index, not out past it
 
         update(&mut state, Action::ScrollUp);
-        assert_eq!(state.scroll, 1);
+        assert_eq!(state.focused().scroll, 1);
 
         for _ in 0..10 {
             update(&mut state, Action::ScrollUp);
         }
-        assert_eq!(state.scroll, 0); // saturates, never wraps negative
+        assert_eq!(state.focused().scroll, 0); // saturates, never wraps negative
     }
 
     #[test]
     fn manual_scroll_cancels_the_auto_follow_target() {
         let mut state = state_with(vec![commit("A")]);
-        state.scroll_target = 2; // pretend a transition is easing us toward line 2
+        state.decks[0].scroll_target = 2; // pretend a transition is easing toward line 2
         update(&mut state, Action::ScrollUp);
         // Manual input takes over immediately; nothing should keep easing past it.
-        assert_eq!(state.scroll_target, state.scroll);
+        assert_eq!(state.focused().scroll_target, state.focused().scroll);
     }
 
     #[test]
     fn set_playhead_swaps_snapshot_and_ghosts_but_leaves_scroll_for_easing() {
         let mut state = state_with(vec![commit("A"), commit("B")]);
-        state.scroll = 5;
+        state.decks[0].scroll = 5;
 
         set_playhead(
             &mut state,
+            0,
             0,
             snapshot("only one line\n"),
             HashMap::new(),
             Direction::Backward,
         );
 
-        assert_eq!(state.playhead, 0);
-        assert_eq!(&*state.current.content, "only one line\n");
-        assert_eq!(state.direction, Direction::Backward);
+        let d = state.focused();
+        assert_eq!(d.playhead, 0);
+        assert_eq!(&*d.current.content, "only one line\n");
+        assert_eq!(d.direction, Direction::Backward);
         // No fresh ghosts this transition, so the follow target doesn't move...
-        assert_eq!(state.scroll_target, 0);
+        assert_eq!(d.scroll_target, 0);
         // ...and `scroll` itself is untouched, left for `ease_scroll` to animate.
-        assert_eq!(state.scroll, 5);
+        assert_eq!(d.scroll, 5);
     }
 
     #[test]
@@ -415,32 +515,33 @@ mod tests {
 
         set_playhead(
             &mut state,
+            0,
             1,
             snapshot("l\n".repeat(20).as_str()),
             ghosts,
             Direction::Forward,
         );
 
-        assert_eq!(state.scroll_target, 7); // 10 - FOLLOW_MARGIN(3)
+        assert_eq!(state.focused().scroll_target, 7); // 10 - FOLLOW_MARGIN(3)
     }
 
     #[test]
     fn ease_scroll_converges_without_overshoot() {
         let mut state = state_with(vec![commit("A")]);
-        state.scroll = 0;
-        state.scroll_target = 10;
+        state.decks[0].scroll = 0;
+        state.decks[0].scroll_target = 10;
 
         let mut steps = 0;
-        while state.scroll != state.scroll_target {
+        while state.focused().scroll != state.focused().scroll_target {
             ease_scroll(&mut state);
             steps += 1;
             assert!(steps < 100, "ease_scroll never converged");
         }
-        assert_eq!(state.scroll, 10);
+        assert_eq!(state.focused().scroll, 10);
 
         // Calling again once converged must be a no-op, not oscillate.
         ease_scroll(&mut state);
-        assert_eq!(state.scroll, 10);
+        assert_eq!(state.focused().scroll, 10);
     }
 
     #[test]
@@ -448,10 +549,10 @@ mod tests {
         // The event loop intercepts these before they ever reach update(); this
         // guards against someone routing them here and silently dropping a scrub.
         let mut state = state_with(vec![commit("A")]);
-        let before = state.playhead;
+        let before = state.focused().playhead;
         update(&mut state, Action::ScrubForward);
         update(&mut state, Action::ScrubBackward);
-        assert_eq!(state.playhead, before);
+        assert_eq!(state.focused().playhead, before);
     }
 
     #[test]
@@ -497,11 +598,12 @@ mod tests {
     }
 
     #[test]
-    fn set_playhead_always_invalidates_blame() {
+    fn set_playhead_invalidates_blame_for_the_focused_deck() {
         let mut state = state_with(vec![commit("A"), commit("B")]);
         state.blame = Some(vec![]);
         set_playhead(
             &mut state,
+            0,
             1,
             snapshot("x\n"),
             HashMap::new(),
@@ -535,13 +637,13 @@ mod tests {
             commit("refactor core"),
             commit("fix typo"),
         ]);
-        state.playhead = 0;
+        state.decks[0].playhead = 0;
         state.search = Some("fx".into()); // subsequence of "fix", not "add"/"refactor"
 
         // Nearest match strictly after the playhead: index 3 ("fix typo").
         assert_eq!(search_target(&state), Some(3));
 
-        state.playhead = 3;
+        state.decks[0].playhead = 3;
         // From the last index, wraps back around to index 0 ("fix bug").
         assert_eq!(search_target(&state), Some(0));
     }
@@ -567,10 +669,10 @@ mod tests {
             commit_at("t1", day),
             commit_at("t2", 2 * day),
         ]);
-        state.playhead = 0;
+        state.decks[0].playhead = 0;
         assert_eq!(jump_target(&state, true, day), 2); // first commit >= +1 day
 
-        state.playhead = 3; // time = 2*day; target = 2*day - day = day
+        state.decks[0].playhead = 3; // time = 2*day; target = 2*day - day = day
         assert_eq!(jump_target(&state, false, day), 2); // "t1" is exactly 1 day back
     }
 
@@ -579,5 +681,53 @@ mod tests {
         let state = state_with(vec![commit_at("only", 0)]);
         assert_eq!(jump_target(&state, true, 86_400), 0);
         assert_eq!(jump_target(&state, false, 86_400), 0);
+    }
+
+    #[test]
+    fn toggle_pincer_spawns_and_removes_the_second_deck_with_fixed_roles() {
+        let mut state = state_with(vec![commit("A"), commit("B")]);
+        assert_eq!(state.decks.len(), 1);
+        assert!(!state.pincer);
+
+        update(&mut state, Action::TogglePincer);
+        assert!(state.pincer);
+        assert_eq!(state.decks.len(), 2);
+        // Both seeded at the same position, with fixed opposite roles.
+        assert_eq!(state.decks[0].playhead, state.decks[1].playhead);
+        assert_eq!(state.decks[0].direction, Direction::Forward);
+        assert_eq!(state.decks[1].direction, Direction::Backward);
+        assert_eq!(state.focus, 0);
+
+        update(&mut state, Action::TogglePincer);
+        assert!(!state.pincer);
+        assert_eq!(state.decks.len(), 1);
+        assert_eq!(state.focus, 0);
+    }
+
+    #[test]
+    fn toggle_focus_only_switches_inside_pincer_mode() {
+        let mut state = state_with(vec![commit("A")]);
+        update(&mut state, Action::ToggleFocus); // no-op in single-deck mode
+        assert_eq!(state.focus, 0);
+
+        update(&mut state, Action::TogglePincer);
+        update(&mut state, Action::ToggleFocus);
+        assert_eq!(state.focus, 1);
+        update(&mut state, Action::ToggleFocus);
+        assert_eq!(state.focus, 0);
+    }
+
+    #[test]
+    fn ease_scroll_animates_both_decks_independently() {
+        let mut state = state_with(vec![commit("A"), commit("B")]);
+        update(&mut state, Action::TogglePincer);
+        state.decks[0].scroll_target = 9;
+        state.decks[1].scroll_target = 6;
+
+        for _ in 0..100 {
+            ease_scroll(&mut state);
+        }
+        assert_eq!(state.decks[0].scroll, 9);
+        assert_eq!(state.decks[1].scroll, 6);
     }
 }

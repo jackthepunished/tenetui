@@ -43,11 +43,15 @@ pub enum Action {
     /// Enter `/`-search mode.
     SearchStart,
     ToggleHelp,
+    /// Toggle the temporal pincer (two playheads, forward + inverted).
+    TogglePincer,
+    /// Switch focus between the two pincer decks.
+    ToggleFocus,
 }
 
 impl Action {
     /// Every action, in a stable display order (used to build the help overlay).
-    pub const ALL: [Action; 19] = [
+    pub const ALL: [Action; 21] = [
         Action::ScrubForward,
         Action::ScrubBackward,
         Action::TogglePlayback,
@@ -61,6 +65,8 @@ impl Action {
         Action::JumpLast,
         Action::SearchStart,
         Action::ToggleBlame,
+        Action::TogglePincer,
+        Action::ToggleFocus,
         Action::ScrollDown,
         Action::ScrollUp,
         Action::Top,
@@ -91,6 +97,8 @@ impl Action {
             Action::JumpLast => "jump_last",
             Action::SearchStart => "search",
             Action::ToggleHelp => "help",
+            Action::TogglePincer => "toggle_pincer",
+            Action::ToggleFocus => "toggle_focus",
         }
     }
 
@@ -121,6 +129,8 @@ impl Action {
             Action::JumpLast => "last commit (HEAD)",
             Action::SearchStart => "search commit messages",
             Action::ToggleHelp => "toggle this help",
+            Action::TogglePincer => "temporal pincer (turnstile)",
+            Action::ToggleFocus => "switch pincer pane",
         }
     }
 }
@@ -254,6 +264,8 @@ impl Default for Keymap {
         bind(KeyChord::plain(Char('g')), JumpFirst);
         bind(KeyChord::plain(Char('/')), SearchStart);
         bind(KeyChord::plain(Char('?')), ToggleHelp);
+        bind(KeyChord::plain(Char('t')), TogglePincer);
+        bind(KeyChord::plain(Tab), ToggleFocus);
 
         Keymap { bindings }
     }

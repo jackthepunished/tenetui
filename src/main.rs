@@ -76,13 +76,13 @@ fn main() -> Result<()> {
         repo,
         cli.repo.clone(),
         timeline,
-        state.playhead,
+        state.focused().playhead,
         config.cache_size(),
     );
 
     // Kick off highlighting of the initial HEAD snapshot; it lands on an early
     // frame (~20ms later) via the async worker rather than blocking startup.
-    engine.request_highlight(&state);
+    engine.request_highlight(&state, 0);
 
     // `ratatui::init` enables raw mode, enters the alternate screen, and installs
     // a panic hook that restores the terminal — so a crash never leaves it broken.
@@ -109,8 +109,8 @@ struct Engine {
     blame_generation: u64,
     highlight_requests: Sender<HighlightRequest>,
     highlight_ready: Receiver<HighlightResult>,
-    /// Generation guard for highlighting, same role as `blame_generation`.
-    highlight_generation: u64,
+    /// Generation guard for highlighting, per deck (pincer mode has two).
+    highlight_generation: [u64; 2],
 }
 
 impl Engine {
@@ -159,88 +159,122 @@ impl Engine {
             blame_generation: 0,
             highlight_requests: hl_req_tx,
             highlight_ready: hl_ready_rx,
-            highlight_generation: 0,
+            highlight_generation: [0, 0],
         }
     }
 
-    /// Request highlighting of the current snapshot, bumping the generation so a
-    /// result for the old position is dropped on receipt. A no-op payload (an
-    /// absent file) still bumps the generation so stale colors can't reappear.
-    fn request_highlight(&mut self, state: &AppState) {
-        self.highlight_generation += 1;
+    /// Request highlighting of `deck`'s current snapshot, bumping that deck's
+    /// generation so a result for its old position is dropped on receipt. A
+    /// no-op payload (an absent file) still bumps the generation so stale colors
+    /// can't reappear.
+    fn request_highlight(&mut self, state: &AppState, deck: usize) {
+        let d = &state.decks[deck];
+        let path = state
+            .commit_at(deck)
+            .map(|c| c.path.clone())
+            .unwrap_or_else(|| state.file_path.clone());
+        self.highlight_generation[deck] += 1;
         let _ = self.highlight_requests.send(HighlightRequest {
-            generation: self.highlight_generation,
-            content: state.current.content.clone(),
-            // The path at the playhead (drives syntax selection) — may differ
-            // from the session path once scrubbed back across a rename.
-            path: state.current_path().to_string(),
+            generation: self.highlight_generation[deck],
+            deck,
+            content: d.current.content.clone(),
+            path,
             theme: state.theme,
         });
     }
 
-    /// Resolve one commit-step of scrubbing in the given direction.
+    /// Resolve one commit-step of scrubbing of the *focused* deck.
     fn scrub(&mut self, state: &mut AppState, forward: bool) -> Result<bool> {
+        let deck = state.focus;
         let len = state.timeline.len();
         if len == 0 {
             return Ok(false);
         }
+        let cur = state.decks[deck].playhead;
         let next = if forward {
-            (state.playhead + 1).min(len - 1)
+            (cur + 1).min(len - 1)
         } else {
-            state.playhead.saturating_sub(1)
+            cur.saturating_sub(1)
         };
-        self.jump_to(state, next)
+        self.jump_to(state, deck, next)
     }
 
-    /// Move the playhead directly to `next` (used by scrub, `g`/`G`, day/week
-    /// jumps, and search) — fetch its snapshot (cache hit or a git2 tree
-    /// lookup), diff against the outgoing snapshot for ghosting, hand the
-    /// result to `app::set_playhead`, then re-arm the prefetch hint and (if the
-    /// gutter is visible) request fresh blame. This and [`Self::drain_prefetched`]/
-    /// [`Self::drain_blame`] are the only places the event loop talks to git2;
-    /// `app`/`ui` never do. Returns whether the playhead actually moved (used to
-    /// auto-pause playback at either end of history).
-    fn jump_to(&mut self, state: &mut AppState, next: usize) -> Result<bool> {
-        if state.timeline.is_empty() || next == state.playhead {
+    /// Advance the temporal pincer one tick: the forward deck (0) steps toward
+    /// the future, the inverted deck (1) toward the past. Returns whether either
+    /// deck actually moved (so playback stops once both hit their ends).
+    fn pincer_tick(&mut self, state: &mut AppState) -> Result<bool> {
+        let len = state.timeline.len();
+        if len == 0 {
+            return Ok(false);
+        }
+        let next0 = (state.decks[0].playhead + 1).min(len - 1);
+        let moved0 = self.jump_to(state, 0, next0)?;
+        let next1 = state.decks[1].playhead.saturating_sub(1);
+        let moved1 = self.jump_to(state, 1, next1)?;
+        Ok(moved0 || moved1)
+    }
+
+    /// Move `deck`'s playhead to `next` (used by scrub, the pincer, `g`/`G`,
+    /// day/week jumps, and search) — fetch its snapshot (cache hit or a git2
+    /// tree lookup), diff against the outgoing snapshot for ghosting, hand the
+    /// result to `app::set_playhead`, then re-arm the prefetch hint and (if this
+    /// is the focused deck and blame is on) request fresh blame. This and the
+    /// drain methods are the only places the event loop talks to git2. Returns
+    /// whether the playhead actually moved.
+    fn jump_to(&mut self, state: &mut AppState, deck: usize, next: usize) -> Result<bool> {
+        let playhead = state.decks[deck].playhead;
+        if state.timeline.is_empty() || next == playhead {
             return Ok(false);
         }
 
-        let forward = next > state.playhead;
+        let forward = next > playhead;
         let oid = state.timeline[next].oid;
         let path = state.timeline[next].path.clone();
-        let old_content = state.current.content.clone();
+        let old_content = state.decks[deck].current.content.clone();
         let snapshot = self.cache.get_or_fetch(&self.repo, oid, &path)?;
-        let ghosts = diff::compute_ghosts(&old_content, &snapshot.content, &state.ghosts);
-        let direction = if forward {
+        let ghosts =
+            diff::compute_ghosts(&old_content, &snapshot.content, &state.decks[deck].ghosts);
+
+        // In pincer mode a deck's ghost hue is fixed by its role (0 forward/red,
+        // 1 inverted/blue); otherwise it follows the movement direction.
+        let direction = if state.pincer {
+            if deck == 0 {
+                Direction::Forward
+            } else {
+                Direction::Backward
+            }
+        } else if forward {
             Direction::Forward
         } else {
             Direction::Backward
         };
 
-        app::set_playhead(state, next, snapshot, ghosts, direction);
+        app::set_playhead(state, deck, next, snapshot, ghosts, direction);
         // Show plain text immediately; the async worker colorizes a beat later.
-        app::set_highlighted(state, None);
-        self.request_highlight(state);
+        app::set_highlighted(state, deck, None);
+        self.request_highlight(state, deck);
         let _ = self.hints.send(next);
-        if state.blame_visible {
+        if deck == state.focus && state.blame_visible {
             self.request_blame(state);
         }
         Ok(true)
     }
 
-    /// Send a fresh blame request for the current playhead, bumping the
+    /// Send a fresh blame request for the *focused* deck's playhead, bumping the
     /// generation so any result still in flight for the old position is
     /// discarded on arrival instead of overwriting newer data.
     fn request_blame(&mut self, state: &AppState) {
         let Some(commit) = state.current_commit() else {
             return;
         };
+        let (oid, path) = (commit.oid, commit.path.clone());
+        let line_count = state.focused().current.line_count();
         self.blame_generation += 1;
         let _ = self.blame_requests.send(BlameRequest {
             generation: self.blame_generation,
-            oid: commit.oid,
-            path: commit.path.clone(),
-            line_count: state.current.line_count(),
+            oid,
+            path,
+            line_count,
         });
     }
 
@@ -262,12 +296,15 @@ impl Engine {
         }
     }
 
-    /// Apply a completed highlight result if it's still current; drop stale ones.
-    /// Never blocks.
+    /// Apply a completed highlight result to its deck if still current; drop
+    /// stale ones (superseded move, or a deck that no longer exists after
+    /// leaving pincer mode). Never blocks.
     fn drain_highlight(&mut self, state: &mut AppState) {
         while let Ok(result) = self.highlight_ready.try_recv() {
-            if result.generation == self.highlight_generation {
-                app::set_highlighted(state, result.highlighted);
+            if result.deck < state.decks.len()
+                && result.generation == self.highlight_generation[result.deck]
+            {
+                app::set_highlighted(state, result.deck, result.highlighted);
             }
         }
     }
@@ -319,8 +356,15 @@ fn run(
                 }
             }
         } else if state.playing {
-            let forward = state.direction == Direction::Forward;
-            let moved = engine.scrub(&mut state, forward)?;
+            // A poll timeout with no key is the playback tick. In pincer mode
+            // that advances both decks at once; otherwise the focused deck in
+            // its own direction.
+            let moved = if state.pincer {
+                engine.pincer_tick(&mut state)?
+            } else {
+                let forward = state.focused().direction == Direction::Forward;
+                engine.scrub(&mut state, forward)?
+            };
             if !moved {
                 // Ran off the end (or start) of history — nothing left to play.
                 state.playing = false;
@@ -339,30 +383,41 @@ fn handle_action(state: &mut AppState, engine: &mut Engine, action: Action) -> R
             engine.scrub(state, false)?;
         }
         Action::JumpDayForward => {
-            let target = app::jump_target(state, true, ONE_DAY_SECS);
-            engine.jump_to(state, target)?;
+            let (deck, target) = (state.focus, app::jump_target(state, true, ONE_DAY_SECS));
+            engine.jump_to(state, deck, target)?;
         }
         Action::JumpDayBackward => {
-            let target = app::jump_target(state, false, ONE_DAY_SECS);
-            engine.jump_to(state, target)?;
+            let (deck, target) = (state.focus, app::jump_target(state, false, ONE_DAY_SECS));
+            engine.jump_to(state, deck, target)?;
         }
         Action::JumpWeekForward => {
-            let target = app::jump_target(state, true, ONE_WEEK_SECS);
-            engine.jump_to(state, target)?;
+            let (deck, target) = (state.focus, app::jump_target(state, true, ONE_WEEK_SECS));
+            engine.jump_to(state, deck, target)?;
         }
         Action::JumpWeekBackward => {
-            let target = app::jump_target(state, false, ONE_WEEK_SECS);
-            engine.jump_to(state, target)?;
+            let (deck, target) = (state.focus, app::jump_target(state, false, ONE_WEEK_SECS));
+            engine.jump_to(state, deck, target)?;
         }
         Action::JumpFirst => {
-            engine.jump_to(state, 0)?;
+            let deck = state.focus;
+            engine.jump_to(state, deck, 0)?;
         }
         Action::JumpLast => {
+            let deck = state.focus;
             let last = state.timeline.len().saturating_sub(1);
-            engine.jump_to(state, last)?;
+            engine.jump_to(state, deck, last)?;
         }
         Action::ToggleBlame => {
             app::update(state, action);
+            if state.blame_visible {
+                engine.request_blame(state);
+            }
+        }
+        Action::TogglePincer | Action::ToggleFocus => {
+            app::update(state, action);
+            // The deck set / focus changed: blame was cleared, so refresh it for
+            // the (possibly new) focused deck. Highlighting rides along on the
+            // cloned deck when entering pincer, so it needs no re-request.
             if state.blame_visible {
                 engine.request_blame(state);
             }
@@ -386,7 +441,8 @@ fn handle_search_key(
         SearchAction::Cancel => app::search_cancel(state),
         SearchAction::Confirm => {
             if let Some(target) = app::search_target(state) {
-                engine.jump_to(state, target)?;
+                let deck = state.focus;
+                engine.jump_to(state, deck, target)?;
             }
             app::search_cancel(state);
         }

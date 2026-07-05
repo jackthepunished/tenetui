@@ -9,6 +9,7 @@
 
 use crate::theme::{SyntaxClass, Theme, syntax_rgb};
 use ratatui::style::Color;
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
@@ -93,6 +94,9 @@ impl Default for Highlighter {
 /// runs on its own thread and the main loop only ever reads finished results.
 pub struct HighlightRequest {
     pub generation: u64,
+    /// Which deck this is for (temporal pincer has two); echoed back so the
+    /// result is routed to the right pane.
+    pub deck: usize,
     pub content: Arc<str>,
     pub path: String,
     pub theme: Theme,
@@ -100,27 +104,38 @@ pub struct HighlightRequest {
 
 pub struct HighlightResult {
     pub generation: u64,
+    pub deck: usize,
     pub highlighted: Option<Highlighted>,
 }
 
-/// Highlight worker loop: block for a request, coalesce to the latest (only the
-/// position the user settled on needs coloring; ones scrubbed through are
-/// superseded), highlight, send back. Ends when either channel closes.
+/// Highlight worker loop: block for a request, then coalesce the queued backlog
+/// to the latest request *per deck* (positions scrubbed through are superseded,
+/// but the two pincer decks don't starve each other), highlight each, send back.
+/// Ends when either channel closes.
 pub fn run(requests: Receiver<HighlightRequest>, ready: Sender<HighlightResult>) {
     let highlighter = Highlighter::new();
-    while let Ok(mut request) = requests.recv() {
-        while let Ok(latest) = requests.try_recv() {
-            request = latest;
-        }
-        let highlighted = highlighter.highlight(&request.content, &request.path, &request.theme);
-        if ready
-            .send(HighlightResult {
-                generation: request.generation,
-                highlighted,
-            })
-            .is_err()
-        {
+    loop {
+        let Ok(first) = requests.recv() else {
             return;
+        };
+        let mut latest: HashMap<usize, HighlightRequest> = HashMap::new();
+        latest.insert(first.deck, first);
+        while let Ok(req) = requests.try_recv() {
+            latest.insert(req.deck, req);
+        }
+        for request in latest.into_values() {
+            let highlighted =
+                highlighter.highlight(&request.content, &request.path, &request.theme);
+            if ready
+                .send(HighlightResult {
+                    generation: request.generation,
+                    deck: request.deck,
+                    highlighted,
+                })
+                .is_err()
+            {
+                return;
+            }
         }
     }
 }

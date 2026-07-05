@@ -49,9 +49,15 @@ Scrub with `h`/`l`, press `space` to play, `?` for the full key list. That's it.
 | `g` / `G` | first commit / last commit (HEAD) |
 | `/` | fuzzy-search commit messages |
 | `B` | toggle the blame gutter |
+| `t` | temporal pincer: two playheads, forward + inverted, side by side |
+| `Tab` | switch focus between the pincer panes |
 | `j` / `k` | scroll the file |
 | `?` | help overlay |
 | `q` | quit |
+
+In pincer mode, `space` runs both playheads at once — the forward pane steps
+toward HEAD (red) while the inverted pane runs toward the root (blue), the two
+jaws of the timeline closing as they go.
 
 Changed lines glow — **red** when moving forward, **blue** when inverted — and
 fade over the next few steps, leaving a comet trail during playback. The timeline
