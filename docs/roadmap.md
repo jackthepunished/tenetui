@@ -57,7 +57,7 @@ Milestones are ordered; each produces something runnable. Claude Code: tick chec
 
 - [x] `m` toggles a braille-canvas map: warped gravity-well grid centered on the playhead, past commits left/blue, future right/red, churn as intensity, tag/merge landmarks, dashed paths radiating to the white-hot "you are here" pivot, real event-details panel
 - [ ] Real stats strip (cache hits / worker events) as an optional follow-up
-- [ ] Dual-pivot map in pincer mode (currently renders the focused deck)
+- [x] Dual-pivot map in pincer mode: two anchors on a horizontal spacetime band, red forward / blue inverted, sliding apart during pincer playback
 
 **Accept:** the map re-anchors live while scrubbing/playing; everything on it is real data in the Tenet palette.
 

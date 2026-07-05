@@ -67,6 +67,17 @@ fn paint(ctx: &mut Context, state: &AppState) {
         return;
     }
 
+    if state.pincer && state.decks.len() > 1 {
+        paint_pincer(ctx, state);
+    } else {
+        paint_single(ctx, state);
+    }
+}
+
+/// The single-pivot map: one radial gravity well centered on the playhead.
+fn paint_single(ctx: &mut Context, state: &AppState) {
+    let th = &state.theme;
+    let n = state.timeline.len();
     let playhead = state.focused().playhead;
     let max_churn = state
         .timeline
@@ -109,7 +120,7 @@ fn paint(ctx: &mut Context, state: &AppState) {
         let commit = &state.timeline[i];
         let intensity = 0.25 + 0.45 * (commit.churn() as f64 / max_churn) as f32;
         let color = th.timeline_cell(pole_of(i, playhead), intensity);
-        dashed_arc(ctx, x, y, i, color);
+        dashed_arc(ctx, x, y, 0.0, 0.0, i, color);
     }
 
     // Nodes on top of paths.
@@ -171,7 +182,7 @@ fn paint(ctx: &mut Context, state: &AppState) {
     }
 
     // The white-hot pivot: "you are here".
-    pivot(ctx, th);
+    pivot(ctx, 0.0, 0.0, th.timeline_cell(Pole::Pivot, 1.0));
     if let Some(commit) = state.current_commit() {
         ctx.print(
             0.07,
@@ -221,14 +232,19 @@ fn node_pos(i: usize, playhead: usize, max_dist: f64) -> (f64, f64) {
     let r = 0.34 + 0.60 * (dist / max_dist).powf(0.62);
 
     // Deterministic scatter in [-1, 1] — stable per commit index, no RNG.
-    let h = (i.wrapping_mul(2_654_435_761) >> 8) % 2048;
-    let scatter = (h as f64 / 1023.5) - 1.0;
-    let angle = scatter * 0.85; // fan of ±~49° around the horizontal axis
+    let angle = hash_scatter(i) * 0.85; // fan of ±~49° around the horizontal axis
 
     let dir = if i < playhead { -1.0 } else { 1.0 };
     let x = dir * r * angle.cos() * (X_MAX * 0.82);
     let y = r * angle.sin() * SQUASH;
     (x, y)
+}
+
+/// A deterministic per-commit scatter in [-1, 1] - stable across frames (no
+/// RNG), so the constellation never shimmers between redraws.
+fn hash_scatter(i: usize) -> f64 {
+    let h = (i.wrapping_mul(2_654_435_761) >> 8) % 2048;
+    (h as f64 / 1023.5) - 1.0
 }
 
 /// The warped ring-and-spoke grid, all dim steel. Rings crowd toward the center
@@ -297,20 +313,29 @@ fn node(ctx: &mut Context, x: f64, y: f64, commit: &CommitMeta, color: ratatui::
 
 /// A dashed quadratic arc from a node to the origin. Curvature alternates by
 /// index so neighboring paths bow apart instead of overlapping.
-fn dashed_arc(ctx: &mut Context, x: f64, y: f64, i: usize, color: ratatui::style::Color) {
+fn dashed_arc(
+    ctx: &mut Context,
+    x: f64,
+    y: f64,
+    tx: f64,
+    ty: f64,
+    i: usize,
+    color: ratatui::style::Color,
+) {
     let bow = if i.is_multiple_of(2) { 0.16 } else { -0.16 };
-    // Control point: midpoint pushed perpendicular to the chord.
-    let (mx, my) = (x / 2.0, y / 2.0);
-    let len = (x * x + y * y).sqrt().max(1e-6);
-    let (px, py) = (-y / len, x / len);
+    // Control point: chord midpoint pushed perpendicular to the chord.
+    let (mx, my) = ((x + tx) / 2.0, (y + ty) / 2.0);
+    let (dx, dy) = (tx - x, ty - y);
+    let len = (dx * dx + dy * dy).sqrt().max(1e-6);
+    let (px, py) = (-dy / len, dx / len);
     let (cx, cy) = (mx + px * bow, my + py * bow);
 
     const SEGS: usize = 26;
     let point = |t: f64| {
         let u = 1.0 - t;
         (
-            u * u * x + 2.0 * u * t * cx, // bezier toward origin (0,0)
-            u * u * y + 2.0 * u * t * cy,
+            u * u * x + 2.0 * u * t * cx + t * t * tx,
+            u * u * y + 2.0 * u * t * cy + t * t * ty,
         )
     };
     let mut dots: Vec<(f64, f64)> = Vec::with_capacity(SEGS);
@@ -328,20 +353,162 @@ fn dashed_arc(ctx: &mut Context, x: f64, y: f64, i: usize, color: ratatui::style
     });
 }
 
-/// The white-hot "now": a dense cluster at the origin.
-fn pivot(ctx: &mut Context, th: &Theme) {
+/// A hot pivot cluster at `(cx, cy)` — white for the single "now", red/blue for
+/// the two pincer anchors.
+fn pivot(ctx: &mut Context, cx: f64, cy: f64, color: ratatui::style::Color) {
     let mut dots = Vec::new();
     let mut a = 0.0_f64;
     while a < std::f64::consts::TAU {
-        dots.push((0.03 * a.cos() * 1.6, 0.03 * a.sin()));
-        dots.push((0.015 * a.cos() * 1.6, 0.015 * a.sin()));
+        dots.push((cx + 0.03 * a.cos() * 1.6, cy + 0.03 * a.sin()));
+        dots.push((cx + 0.015 * a.cos() * 1.6, cy + 0.015 * a.sin()));
         a += 0.5;
     }
-    dots.push((0.0, 0.0));
+    dots.push((cx, cy));
     ctx.draw(&Points {
         coords: &dots,
-        color: th.timeline_cell(Pole::Pivot, 1.0),
+        color,
     });
+}
+
+/// The dual-pivot pincer map: the whole timeline laid as a horizontal spacetime
+/// band, with two hot anchors — the forward deck (red) and the inverted deck
+/// (blue) — and their radiating webs. During pincer playback the two anchors
+/// slide apart from a shared "now": red territory grows rightward toward the
+/// future, blue leftward toward the past.
+fn paint_pincer(ctx: &mut Context, state: &AppState) {
+    let th = &state.theme;
+    let n = state.timeline.len();
+    let p_fwd = state.decks[0].playhead;
+    let p_inv = state.decks[1].playhead;
+    let max_churn = state
+        .timeline
+        .iter()
+        .map(|c| c.churn())
+        .max()
+        .unwrap_or(1)
+        .max(1) as f64;
+
+    let near = |i: usize| i.abs_diff(p_fwd).min(i.abs_diff(p_inv));
+    let mut indices: Vec<usize> = (0..n).collect();
+    indices.sort_by_key(|&i| near(i));
+    let mut plotted: Vec<usize> = indices
+        .iter()
+        .copied()
+        .take(MAX_NODES)
+        .chain(
+            indices
+                .iter()
+                .copied()
+                .filter(|&i| state.timeline[i].is_tagged || state.timeline[i].is_merge),
+        )
+        .collect();
+    plotted.sort_unstable();
+    plotted.dedup();
+    let max_dist = plotted.iter().map(|&i| near(i)).max().unwrap_or(1).max(1) as f64;
+
+    // Index → x across the full width; y pinches toward whichever pivot a node
+    // is nearest (two wells on the band); hue = the nearer pivot's color.
+    let span = (n.max(2) - 1) as f64;
+    let xn = |i: usize| ((i as f64) / span - 0.5) * 2.0 * X_MAX * 0.9;
+    let ypos = |i: usize| {
+        let amp = 0.12 + 0.62 * (near(i) as f64 / max_dist).min(1.0);
+        hash_scatter(i) * amp * Y_MAX * 0.82
+    };
+    let pole = |i: usize| {
+        if i.abs_diff(p_fwd) <= i.abs_diff(p_inv) {
+            Pole::Future
+        } else {
+            Pole::Past
+        }
+    };
+
+    // Comet trails for both decks.
+    for deck in &state.decks {
+        for (age, &idx) in deck.trail.iter().enumerate() {
+            if idx == deck.playhead {
+                continue;
+            }
+            let frac = 1.0 - age as f32 / deck.trail.len().max(1) as f32;
+            let (x, y) = (xn(idx), ypos(idx));
+            ctx.draw(&Points {
+                coords: &[(x, y), (x + 0.014, y), (x - 0.014, y)],
+                color: th.timeline_cell(Pole::Pivot, 0.25 + 0.6 * frac),
+            });
+        }
+    }
+
+    // Dashed webs: each pivot to its nearest commits, in that pivot's color.
+    let path_intensity =
+        |i: usize| 0.25 + 0.45 * (state.timeline[i].churn() as f64 / max_churn) as f32;
+    let mut by_fwd = plotted.clone();
+    by_fwd.sort_by_key(|&i| i.abs_diff(p_fwd));
+    for &i in by_fwd.iter().filter(|&&i| i != p_fwd).take(MAX_PATHS / 2) {
+        dashed_arc(
+            ctx,
+            xn(i),
+            ypos(i),
+            xn(p_fwd),
+            0.0,
+            i,
+            th.timeline_cell(Pole::Future, path_intensity(i)),
+        );
+    }
+    let mut by_inv = plotted.clone();
+    by_inv.sort_by_key(|&i| i.abs_diff(p_inv));
+    for &i in by_inv.iter().filter(|&&i| i != p_inv).take(MAX_PATHS / 2) {
+        dashed_arc(
+            ctx,
+            xn(i),
+            ypos(i),
+            xn(p_inv),
+            0.0,
+            i,
+            th.timeline_cell(Pole::Past, path_intensity(i)),
+        );
+    }
+
+    // Nodes, colored by their nearer anchor.
+    for &i in &plotted {
+        if i == p_fwd || i == p_inv {
+            continue;
+        }
+        let commit = &state.timeline[i];
+        let intensity = (0.45 + 0.55 * (commit.churn() as f64 / max_churn)) as f32;
+        node(
+            ctx,
+            xn(i),
+            ypos(i),
+            commit,
+            th.timeline_cell(pole(i), intensity),
+        );
+    }
+
+    // The two anchors and their labels.
+    pivot(ctx, xn(p_fwd), 0.0, th.timeline_cell(Pole::Future, 1.0));
+    pivot(ctx, xn(p_inv), 0.0, th.timeline_cell(Pole::Past, 1.0));
+    ctx.print(
+        xn(p_fwd) - 0.05,
+        0.13,
+        Line::from(Span::styled("▶ forward", Style::default().fg(th.forward()))),
+    );
+    ctx.print(
+        xn(p_inv) - 0.05,
+        -0.15,
+        Line::from(Span::styled(
+            "◀ inverted",
+            Style::default().fg(th.inverted()),
+        )),
+    );
+    ctx.print(
+        -X_MAX + 0.06,
+        Y_MAX - 0.08,
+        Line::from(Span::styled("◀ PAST", Style::default().fg(th.inverted()))),
+    );
+    ctx.print(
+        X_MAX - 0.62,
+        Y_MAX - 0.08,
+        Line::from(Span::styled("FUTURE ▶", Style::default().fg(th.forward()))),
+    );
 }
 
 /// The right-hand panel: the playhead commit's real data.
@@ -540,5 +707,48 @@ mod tests {
         let s = state(0, 0);
         let (text, _) = draw(&s, 100, 24);
         assert!(text.contains("no history"), "{text}");
+    }
+
+    #[test]
+    fn pincer_map_labels_both_anchors_and_splits_territory() {
+        let mut s = state(41, 20);
+        crate::app::update(&mut s, crate::input::Action::TogglePincer);
+        s.decks[0].playhead = 34; // forward, right
+        s.decks[1].playhead = 6; // inverted, left
+
+        let (text, colors) = draw(&s, 120, 32);
+        assert!(text.contains("forward"), "forward label missing: {text}");
+        assert!(text.contains("inverted"), "inverted label missing: {text}");
+
+        // Territory: the future half (right) leans red, the past half (left)
+        // leans blue — the two anchors owning their ends of the band.
+        let (mut left_blue, mut left_red, mut right_blue, mut right_red) = (0, 0, 0, 0);
+        for row in colors.iter().take(30) {
+            for (x, c) in row.iter().enumerate().take(88) {
+                let Color::Rgb(r, _, b) = *c else { continue };
+                if (i16::from(r) - i16::from(b)).abs() <= 40 {
+                    continue;
+                }
+                if x < 44 {
+                    if b > r {
+                        left_blue += 1;
+                    } else {
+                        left_red += 1;
+                    }
+                } else if b > r {
+                    right_blue += 1;
+                } else {
+                    right_red += 1;
+                }
+            }
+        }
+        assert!(
+            left_blue > left_red,
+            "past/inverted side should lean blue: {left_blue} vs {left_red}"
+        );
+        assert!(
+            right_red > right_blue,
+            "future/forward side should lean red: {right_red} vs {right_blue}"
+        );
     }
 }
