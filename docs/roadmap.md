@@ -41,8 +41,8 @@ Milestones are ordered; each produces something runnable. Claude Code: tick chec
 
 - [x] Syntax highlighting (syntect), theme respects terminal colors
 - [x] Config file (`~/.config/tenetui/config.toml`): keybinds, speed, cache size
-- [ ] Help overlay (`?`), README with GIF, `cargo install tenetui` published to crates.io — help overlay done; README/GIF/publish pending
-- [ ] Criterion benches for snapshot + diff hot paths; CI (fmt, clippy -D warnings, test) — benches done; CI pending
+- [x] Help overlay (`?`), README with GIF, `cargo install tenetui` published to crates.io — help overlay + README + `demo.tape` + LICENSE files + `publish --dry-run` done; the maintainer runs `vhs demo.tape` and `cargo publish` (needs a real TTY + crates.io token)
+- [x] Criterion benches for snapshot + diff hot paths; CI (fmt, clippy -D warnings, test)
 
 **Accept:** a stranger can install and use it without reading anything but `?`.
 
