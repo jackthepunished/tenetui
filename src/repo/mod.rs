@@ -26,6 +26,10 @@ pub struct CommitMeta {
     pub summary: String,
     pub insertions: usize,
     pub deletions: usize,
+    /// The file's path *as of this commit*. Constant for a file that was never
+    /// moved; changes at a rename boundary as the walk follows the file back
+    /// under its former name (see `walk::timeline`).
+    pub path: String,
     /// More than one parent — a timeline landmark.
     pub is_merge: bool,
     /// Reachable from a tag (lightweight or annotated) — a timeline landmark.
@@ -164,6 +168,7 @@ mod tests {
             summary: "s".into(),
             insertions: 0,
             deletions: 0,
+            path: "f.txt".into(),
             is_merge: false,
             is_tagged: false,
         }

@@ -48,7 +48,12 @@ fn header(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
             Style::default().fg(th.pivot()).add_modifier(Modifier::BOLD),
         ),
         Span::styled(" ◀   ", Style::default().fg(th.inverted())),
-        Span::styled(state.file_path.clone(), Style::default().fg(th.chrome())),
+        // The path *at the playhead* — surfaces the file's former name when you
+        // scrub back across a rename.
+        Span::styled(
+            state.current_path().to_string(),
+            Style::default().fg(th.chrome()),
+        ),
     ]);
 
     // Doubles as the color key: blue is the past you're inverting toward, red the future.
@@ -78,6 +83,7 @@ mod tests {
             summary: summary.into(),
             insertions: 3,
             deletions: 1,
+            path: "src/lib.rs".into(),
             is_merge: false,
             is_tagged: false,
         }

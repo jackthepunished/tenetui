@@ -29,13 +29,13 @@ fn window(center: usize, len: usize) -> RangeInclusive<usize> {
 
 /// Run the warmer loop: block for the next playhead hint, coalesce any hints
 /// that queued up while idle (only the *latest* position matters), then
-/// materialize and send every snapshot in that window. Returns — ending the
-/// thread — once the hint channel closes (main dropped its sender) or `ready`'s
-/// receiver is gone (main exited); the caller never needs to join it.
+/// materialize and send every snapshot in that window. Each entry carries its
+/// own path (the file's name *at that commit*) so warming still hits after a
+/// rename. Returns — ending the thread — once the hint channel closes (main
+/// dropped its sender) or `ready`'s receiver is gone; never needs joining.
 pub fn run(
     repo_path: PathBuf,
-    file_path: String,
-    oids: Vec<Oid>,
+    entries: Vec<(Oid, String)>,
     hints: Receiver<usize>,
     ready: Sender<(Oid, Snapshot)>,
 ) {
@@ -47,12 +47,12 @@ pub fn run(
         while let Ok(latest) = hints.try_recv() {
             center = latest;
         }
-        for idx in window(center, oids.len()) {
-            let oid = oids[idx];
-            let Ok(snapshot) = snapshot_at(&repo, oid, &file_path) else {
+        for idx in window(center, entries.len()) {
+            let (oid, path) = &entries[idx];
+            let Ok(snapshot) = snapshot_at(&repo, *oid, path) else {
                 continue;
             };
-            if ready.send((oid, snapshot)).is_err() {
+            if ready.send((*oid, snapshot)).is_err() {
                 return;
             }
         }
@@ -88,7 +88,7 @@ mod tests {
         let repo = Repository::init(tmp.path()).unwrap();
         let sig = Signature::now("Test", "test@example.com").unwrap();
 
-        let mut oids = Vec::new();
+        let mut entries: Vec<(Oid, String)> = Vec::new();
         for i in 0..5 {
             fs::write(tmp.path().join("f.txt"), format!("v{i}\n")).unwrap();
             let mut index = repo.index().unwrap();
@@ -102,14 +102,13 @@ mod tests {
             let oid = repo
                 .commit(Some("HEAD"), &sig, &sig, &format!("c{i}"), &tree, &parents)
                 .unwrap();
-            oids.push(oid);
+            entries.push((oid, "f.txt".to_string()));
         }
 
         let (hint_tx, hint_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
         let repo_path = tmp.path().to_path_buf();
-        let handle =
-            std::thread::spawn(move || run(repo_path, "f.txt".into(), oids, hint_rx, ready_tx));
+        let handle = std::thread::spawn(move || run(repo_path, entries, hint_rx, ready_tx));
 
         hint_tx.send(2).unwrap(); // window(2, 5) covers the whole 5-commit history
         drop(hint_tx); // let the loop's next recv() fail once this batch is served

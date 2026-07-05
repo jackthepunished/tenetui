@@ -83,6 +83,9 @@ pub fn blame_at(
 pub struct BlameRequest {
     pub generation: u64,
     pub oid: Oid,
+    /// The file's path *at this commit* — carried per-request so blame keeps
+    /// working after a rename (the file has a different name in older commits).
+    pub path: String,
     pub line_count: usize,
 }
 
@@ -95,12 +98,7 @@ pub struct BlameResult {
 /// queued up while busy (only the *latest* position matters — this is what
 /// makes blame "compute once scrubbing pauses" without a separate debounce
 /// timer), then blame and send. Ends when either channel closes.
-pub fn run(
-    repo_path: PathBuf,
-    file_path: String,
-    requests: Receiver<BlameRequest>,
-    ready: Sender<BlameResult>,
-) {
+pub fn run(repo_path: PathBuf, requests: Receiver<BlameRequest>, ready: Sender<BlameResult>) {
     let Ok(repo) = Repository::discover(&repo_path) else {
         return;
     };
@@ -109,7 +107,7 @@ pub fn run(
         while let Ok(latest) = requests.try_recv() {
             request = latest;
         }
-        if let Ok(lines) = blame_at(&repo, request.oid, &file_path, request.line_count) {
+        if let Ok(lines) = blame_at(&repo, request.oid, &request.path, request.line_count) {
             let _ = ready.send(BlameResult {
                 generation: request.generation,
                 lines,
@@ -211,12 +209,13 @@ mod tests {
         let (req_tx, req_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
         let repo_path = tmp.path().to_path_buf();
-        let handle = std::thread::spawn(move || run(repo_path, "f.txt".into(), req_rx, ready_tx));
+        let handle = std::thread::spawn(move || run(repo_path, req_rx, ready_tx));
 
         req_tx
             .send(BlameRequest {
                 generation: 7,
                 oid,
+                path: "f.txt".to_string(),
                 line_count: 1,
             })
             .unwrap();

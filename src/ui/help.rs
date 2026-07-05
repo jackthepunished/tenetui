@@ -90,6 +90,7 @@ mod tests {
                 summary: "s".into(),
                 insertions: 0,
                 deletions: 0,
+                path: "f.txt".into(),
                 is_merge: false,
                 is_tagged: false,
             }],

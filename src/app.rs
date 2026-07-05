@@ -102,6 +102,15 @@ impl AppState {
         self.timeline.get(self.playhead)
     }
 
+    /// The file's path *at the playhead* — the same as `file_path` unless the
+    /// playhead has scrubbed back across a rename, in which case it's the older
+    /// name. Used for the header and for fetching content/blame/highlighting.
+    pub fn current_path(&self) -> &str {
+        self.current_commit()
+            .map(|c| c.path.as_str())
+            .unwrap_or(&self.file_path)
+    }
+
     /// Upper bound for `scroll` so we never scroll the file entirely off-screen.
     fn max_scroll(&self) -> u16 {
         u16::try_from(self.current.line_count().saturating_sub(1)).unwrap_or(u16::MAX)
@@ -319,6 +328,7 @@ mod tests {
             summary: summary.into(),
             insertions: 0,
             deletions: 0,
+            path: "f.txt".into(),
             is_merge: false,
             is_tagged: false,
         }

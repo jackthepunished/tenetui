@@ -70,12 +70,11 @@ fn main() -> Result<()> {
     let mut keymap = Keymap::default();
     keymap.apply_overrides(&config.keybinds);
 
-    let mut state = AppState::new(theme::Theme::new(), rel.clone(), timeline.clone(), current);
+    let mut state = AppState::new(theme::Theme::new(), rel, timeline.clone(), current);
     state.speed_ms = config.speed_ms();
     let mut engine = Engine::spawn(
         repo,
         cli.repo.clone(),
-        rel,
         timeline,
         state.playhead,
         config.cache_size(),
@@ -121,7 +120,6 @@ impl Engine {
     fn spawn(
         repo: Repository,
         repo_path: PathBuf,
-        file_path: String,
         timeline: Vec<repo::CommitMeta>,
         initial_playhead: usize,
         cache_size: usize,
@@ -132,17 +130,15 @@ impl Engine {
         let (blame_ready_tx, blame_ready_rx) = mpsc::channel();
 
         if !timeline.is_empty() {
-            let oids: Vec<Oid> = timeline.iter().map(|c| c.oid).collect();
+            // Each entry carries the file's path *at that commit* so prefetch and
+            // blame keep working across a rename.
+            let entries: Vec<(Oid, String)> =
+                timeline.iter().map(|c| (c.oid, c.path.clone())).collect();
             {
                 let repo_path = repo_path.clone();
-                let file_path = file_path.clone();
-                thread::spawn(move || {
-                    repo::prefetch::run(repo_path, file_path, oids, hint_rx, ready_tx)
-                });
+                thread::spawn(move || repo::prefetch::run(repo_path, entries, hint_rx, ready_tx));
             }
-            thread::spawn(move || {
-                repo::blame::run(repo_path, file_path, blame_req_rx, blame_ready_tx)
-            });
+            thread::spawn(move || repo::blame::run(repo_path, blame_req_rx, blame_ready_tx));
             let _ = hint_tx.send(initial_playhead);
         }
 
@@ -175,7 +171,9 @@ impl Engine {
         let _ = self.highlight_requests.send(HighlightRequest {
             generation: self.highlight_generation,
             content: state.current.content.clone(),
-            path: state.file_path.clone(),
+            // The path at the playhead (drives syntax selection) — may differ
+            // from the session path once scrubbed back across a rename.
+            path: state.current_path().to_string(),
             theme: state.theme,
         });
     }
@@ -209,8 +207,9 @@ impl Engine {
 
         let forward = next > state.playhead;
         let oid = state.timeline[next].oid;
+        let path = state.timeline[next].path.clone();
         let old_content = state.current.content.clone();
-        let snapshot = self.cache.get_or_fetch(&self.repo, oid, &state.file_path)?;
+        let snapshot = self.cache.get_or_fetch(&self.repo, oid, &path)?;
         let ghosts = diff::compute_ghosts(&old_content, &snapshot.content, &state.ghosts);
         let direction = if forward {
             Direction::Forward
@@ -240,6 +239,7 @@ impl Engine {
         let _ = self.blame_requests.send(BlameRequest {
             generation: self.blame_generation,
             oid: commit.oid,
+            path: commit.path.clone(),
             line_count: state.current.line_count(),
         });
     }
