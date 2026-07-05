@@ -21,7 +21,7 @@ use tenetui::repo::blame::{BlameRequest, BlameResult};
 use tenetui::repo::{self, SnapshotCache};
 use tenetui::syntax::{HighlightRequest, HighlightResult};
 use tenetui::ui::overview::OverviewState;
-use tenetui::{diff, syntax, theme, ui};
+use tenetui::{diff, functions, syntax, theme, ui};
 
 /// Idle poll interval when nothing is playing — just often enough to stay
 /// responsive to terminal resizes.
@@ -356,6 +356,12 @@ impl Engine {
         // Show plain text immediately; the async worker colorizes a beat later.
         app::set_highlighted(state, deck, None);
         self.request_highlight(state, deck);
+        // When scoped to a function, re-resolve its line range in the new
+        // snapshot (a fast tree-sitter parse; `None` = absent at this commit).
+        if let Some(name) = state.scope.clone() {
+            let range = functions::range_of(&state.decks[deck].current.content, &path, &name);
+            app::set_scope_range(state, deck, range);
+        }
         let _ = self.hints.send(next);
         if deck == state.focus && state.blame_visible {
             self.request_blame(state);
@@ -452,8 +458,13 @@ fn run(
                     {
                         app::update(&mut state, Action::ToggleHelp);
                     }
+                } else if state.picker.is_some() {
+                    handle_picker_key(&mut state, engine, key)?;
                 } else if state.search.is_some() {
                     handle_search_key(&mut state, engine, key)?;
+                } else if state.scope.is_some() && key.code == KeyCode::Esc {
+                    // Esc leaves function scope (rather than quitting).
+                    app::exit_scope(&mut state);
                 } else if let Some(action) = keymap.action_for(key) {
                     handle_action(&mut state, engine, action)?;
                 }
@@ -525,9 +536,62 @@ fn handle_action(state: &mut AppState, engine: &mut Engine, action: Action) -> R
                 engine.request_blame(state);
             }
         }
+        Action::OpenFunctions => {
+            // Parse the focused deck's snapshot and open the picker (a no-op if
+            // no functions are found — unsupported file type or feature off).
+            let content = state.focused().current.content.clone();
+            let path = state.current_path().to_string();
+            let fns = functions::functions_in(&content, &path);
+            app::open_picker(state, fns);
+        }
         other => app::update(state, other),
     }
     Ok(())
+}
+
+/// Modal key handling while the function picker is open: `j`/`k` move,
+/// `Enter` scopes to the highlighted function, `Esc` cancels.
+fn handle_picker_key(
+    state: &mut AppState,
+    engine: &mut Engine,
+    key: event::KeyEvent,
+) -> Result<()> {
+    match key.code {
+        KeyCode::Esc => app::close_picker(state),
+        KeyCode::Char('j') | KeyCode::Down => app::picker_down(state),
+        KeyCode::Char('k') | KeyCode::Up => app::picker_up(state),
+        KeyCode::Enter => {
+            if let Some(name) = state
+                .picker
+                .as_ref()
+                .and_then(|p| p.selected_fn())
+                .map(|f| f.name.clone())
+            {
+                enter_scope(state, name);
+                // Blame lines shift when the pane is scoped; refresh if shown.
+                if state.blame_visible {
+                    engine.request_blame(state);
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Enter function scope: resolve the function's line range in every deck's
+/// current snapshot (tree-sitter parse — pure, no git2), then flip the mode on.
+fn enter_scope(state: &mut AppState, name: String) {
+    for deck in 0..state.decks.len() {
+        let content = state.decks[deck].current.content.clone();
+        let path = state
+            .commit_at(deck)
+            .map(|c| c.path.clone())
+            .unwrap_or_else(|| state.file_path.clone());
+        let range = functions::range_of(&content, &path, &name);
+        app::set_scope_range(state, deck, range);
+    }
+    app::enter_scope(state, name);
 }
 
 fn handle_search_key(

@@ -5,6 +5,7 @@
 mod filepane;
 mod help;
 pub mod overview;
+mod picker;
 mod statusbar;
 mod timeline;
 
@@ -33,6 +34,9 @@ pub fn draw(frame: &mut Frame, state: &AppState, keymap: &Keymap) {
     timeline::render(frame, chunks[2], state);
     statusbar::render(frame, chunks[3], state);
 
+    if let Some(picker) = &state.picker {
+        picker::render(frame, frame.area(), picker, &state.theme);
+    }
     if state.help_visible {
         help::render(frame, frame.area(), state, keymap);
     }
@@ -77,6 +81,7 @@ fn render_deck(frame: &mut Frame, area: Rect, state: &AppState, deck: usize) {
         &state.theme,
         show_blame,
         blame,
+        state.scope.is_some(),
     );
 }
 

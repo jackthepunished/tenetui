@@ -9,6 +9,7 @@
 pub mod app;
 pub mod config;
 pub mod diff;
+pub mod functions;
 pub mod input;
 pub mod repo;
 pub mod syntax;

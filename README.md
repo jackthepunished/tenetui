@@ -92,6 +92,18 @@ maps exactly onto scrubbing toward HEAD (forward) versus toward the root
 steel base. True color by default, degrading gracefully to 256- and 16-color
 terminals — where red and blue still exist, so the meaning survives.
 
+## Function tracking (optional)
+
+Built with `--features functions`, `F` opens a picker of the functions in the
+current file (Rust, via tree-sitter); choosing one scopes the pane to that
+function so you can watch just it evolve as you scrub. `Esc` unscopes. It's
+opt-in because tree-sitter and its grammar are a heavy dependency — the default
+build stays light.
+
+```sh
+cargo install tenetui --features functions
+```
+
 ## Build from source
 
 ```sh
@@ -99,6 +111,8 @@ cargo build --release
 cargo test
 cargo clippy --all-targets -- -D warnings
 cargo bench            # criterion benches for the hot paths
+
+cargo test --features functions   # exercise the optional function tracking
 ```
 
 ## License

@@ -48,7 +48,7 @@ Milestones are ordered; each produces something runnable. Claude Code: tick chec
 
 ## M5 — Stretch (post-v1, unordered)
 
-- [ ] Function-level tracking (`git log -L` equivalent via tree-sitter ranges)
+- [x] Function-level tracking (`git log -L` equivalent via tree-sitter ranges) — `F` picker + scoped file pane behind the `functions` feature; timeline-collapse deferred (see decisions.md)
 - [x] "Volatile files" overview screen: repo-wide churn ranking as entry point
 - [x] Rename following across file moves
 - [x] Temporal pincer mode: two playheads side-by-side, one scrubbing forward and one inverted, compare eras

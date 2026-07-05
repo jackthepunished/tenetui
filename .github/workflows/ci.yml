@@ -33,5 +33,11 @@ jobs:
       - name: Clippy (warnings are errors)
         run: cargo clippy --all-targets -- -D warnings
 
+      - name: Clippy (functions feature)
+        run: cargo clippy --all-targets --features functions -- -D warnings
+
       - name: Tests
         run: cargo test --all
+
+      - name: Tests (functions feature)
+        run: cargo test --all --features functions

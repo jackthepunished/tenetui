@@ -60,6 +60,15 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         left.push(Span::styled(label, Style::default().fg(color)));
     }
 
+    // When scoped to a function, name it.
+    if let Some(name) = &state.scope {
+        left.push(sep());
+        left.push(Span::styled(
+            format!("ƒ {name}"),
+            Style::default().fg(th.pivot()),
+        ));
+    }
+
     if let Some(commit) = state.current_commit() {
         left.push(sep());
         left.push(Span::styled(
@@ -106,9 +115,14 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
             "h/l scrub · tab focus · space pincer · t exit · ? help",
             Style::default().fg(th.chrome()),
         ))
+    } else if state.scope.is_some() {
+        Line::from(Span::styled(
+            "h/l scrub · space play · esc unscope · ? help",
+            Style::default().fg(th.chrome()),
+        ))
     } else {
         Line::from(Span::styled(
-            "h/l scrub · space play · t pincer · B blame · / search · ? help",
+            "h/l scrub · space play · B blame · / search · F fn · ? help",
             Style::default().fg(th.chrome()),
         ))
     };

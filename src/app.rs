@@ -4,6 +4,7 @@
 //! pure function of state; see docs/decisions.md "Immediate-mode state model".
 
 use crate::diff;
+use crate::functions::FunctionDef;
 use crate::input::Action;
 use crate::repo::{BlameLine, CommitMeta, Snapshot};
 use crate::syntax::Highlighted;
@@ -49,6 +50,10 @@ pub struct Deck {
     /// Syntax highlighting for `current`, one entry per line, or `None` when the
     /// file type is unknown, the snapshot is absent, or a move just cleared it.
     pub highlighted: Option<Highlighted>,
+    /// When scoped to a function (`arepo`), that function's 0-indexed inclusive
+    /// line range *in this deck's snapshot* — or `None` if it isn't present here.
+    /// Only meaningful while `AppState::scope` is set.
+    pub scope_range: Option<(usize, usize)>,
 }
 
 impl Deck {
@@ -61,6 +66,7 @@ impl Deck {
             scroll: 0,
             scroll_target: 0,
             highlighted: None,
+            scope_range: None,
         }
     }
 
@@ -111,7 +117,25 @@ pub struct AppState {
     pub search: Option<String>,
     /// Whether the help overlay is showing (modal).
     pub help_visible: bool,
+    /// `Some(name)` while scoped to a function (`arepo`): the file pane clamps to
+    /// that function's range in each snapshot. `None` = whole-file view.
+    pub scope: Option<String>,
+    /// The function-picker modal (`F`), if open.
+    pub picker: Option<FunctionPicker>,
     pub should_quit: bool,
+}
+
+/// The modal function picker opened by `F`: the functions found in the current
+/// snapshot, and which one is highlighted.
+pub struct FunctionPicker {
+    pub functions: Vec<FunctionDef>,
+    pub selected: usize,
+}
+
+impl FunctionPicker {
+    pub fn selected_fn(&self) -> Option<&FunctionDef> {
+        self.functions.get(self.selected)
+    }
 }
 
 impl AppState {
@@ -135,6 +159,8 @@ impl AppState {
             blame: None,
             search: None,
             help_visible: false,
+            scope: None,
+            picker: None,
             should_quit: false,
         }
     }
@@ -225,6 +251,9 @@ pub fn update(state: &mut AppState, action: Action) {
         Action::ToggleHelp => state.help_visible = !state.help_visible,
         Action::TogglePincer => toggle_pincer(state),
         Action::ToggleFocus => toggle_focus(state),
+        // Handled by the caller: opening the picker needs to parse the current
+        // snapshot (the `functions` module), which lives outside `app`.
+        Action::OpenFunctions => {}
     }
 }
 
@@ -305,6 +334,60 @@ pub fn set_blame(state: &mut AppState, lines: Vec<BlameLine>) {
 /// independently testable and highlighting can be swapped/disabled.
 pub fn set_highlighted(state: &mut AppState, deck: usize, highlighted: Option<Highlighted>) {
     state.decks[deck].highlighted = highlighted;
+}
+
+/// Open the function picker on `functions` (no-op if the list is empty — e.g. an
+/// unsupported file type, or the `functions` feature is off).
+pub fn open_picker(state: &mut AppState, functions: Vec<FunctionDef>) {
+    if !functions.is_empty() {
+        state.picker = Some(FunctionPicker {
+            functions,
+            selected: 0,
+        });
+    }
+}
+
+pub fn picker_down(state: &mut AppState) {
+    if let Some(p) = &mut state.picker
+        && p.selected + 1 < p.functions.len()
+    {
+        p.selected += 1;
+    }
+}
+
+pub fn picker_up(state: &mut AppState) {
+    if let Some(p) = &mut state.picker {
+        p.selected = p.selected.saturating_sub(1);
+    }
+}
+
+pub fn close_picker(state: &mut AppState) {
+    state.picker = None;
+}
+
+/// Enter function scope by name and close the picker. The per-deck line ranges
+/// (and any re-scroll) are resolved by the caller, which has the parser.
+pub fn enter_scope(state: &mut AppState, name: String) {
+    state.scope = Some(name);
+    state.picker = None;
+    for deck in &mut state.decks {
+        deck.scroll = 0;
+        deck.scroll_target = 0;
+    }
+}
+
+/// Leave function scope; the file pane returns to the whole file.
+pub fn exit_scope(state: &mut AppState) {
+    state.scope = None;
+    for deck in &mut state.decks {
+        deck.scope_range = None;
+    }
+}
+
+/// Record the resolved function range for `deck`'s current snapshot (`None` =
+/// the function isn't present at this commit). Computed by the caller.
+pub fn set_scope_range(state: &mut AppState, deck: usize, range: Option<(usize, usize)>) {
+    state.decks[deck].scope_range = range;
 }
 
 /// Enter `/`-search mode with an empty query.

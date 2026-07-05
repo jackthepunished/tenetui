@@ -47,11 +47,13 @@ pub enum Action {
     TogglePincer,
     /// Switch focus between the two pincer decks.
     ToggleFocus,
+    /// Open the function picker (scope the view to one function).
+    OpenFunctions,
 }
 
 impl Action {
     /// Every action, in a stable display order (used to build the help overlay).
-    pub const ALL: [Action; 21] = [
+    pub const ALL: [Action; 22] = [
         Action::ScrubForward,
         Action::ScrubBackward,
         Action::TogglePlayback,
@@ -67,6 +69,7 @@ impl Action {
         Action::ToggleBlame,
         Action::TogglePincer,
         Action::ToggleFocus,
+        Action::OpenFunctions,
         Action::ScrollDown,
         Action::ScrollUp,
         Action::Top,
@@ -99,6 +102,7 @@ impl Action {
             Action::ToggleHelp => "help",
             Action::TogglePincer => "toggle_pincer",
             Action::ToggleFocus => "toggle_focus",
+            Action::OpenFunctions => "functions",
         }
     }
 
@@ -131,6 +135,7 @@ impl Action {
             Action::ToggleHelp => "toggle this help",
             Action::TogglePincer => "temporal pincer (turnstile)",
             Action::ToggleFocus => "switch pincer pane",
+            Action::OpenFunctions => "scope to a function",
         }
     }
 }
@@ -266,6 +271,7 @@ impl Default for Keymap {
         bind(KeyChord::plain(Char('?')), ToggleHelp);
         bind(KeyChord::plain(Char('t')), TogglePincer);
         bind(KeyChord::plain(Tab), ToggleFocus);
+        bind(KeyChord::plain(Char('F')), OpenFunctions);
 
         Keymap { bindings }
     }

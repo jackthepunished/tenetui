@@ -27,9 +27,24 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// A centered dim message for the "nothing to show here" states.
+fn placeholder(th: &Theme, msg: &str) -> Paragraph<'static> {
+    Paragraph::new(vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            msg.to_string(),
+            Style::default().fg(th.chrome()),
+        )),
+    ])
+    .alignment(Alignment::Center)
+    .wrap(Wrap { trim: true })
+}
+
 /// Render one deck into `area`. `show_blame` toggles the blame gutter; `blame`
 /// is that deck's resolved blame (only the focused deck has it — `None` renders
-/// a blank gutter while the async result is in flight).
+/// a blank gutter while the async result is in flight). When `scoped`, the pane
+/// clamps to `deck.scope_range` (a function), or shows a placeholder if that
+/// function is absent at this commit.
 pub fn render(
     frame: &mut Frame,
     area: Rect,
@@ -37,23 +52,29 @@ pub fn render(
     theme: &Theme,
     show_blame: bool,
     blame: Option<&[BlameLine]>,
+    scoped: bool,
 ) {
     let th = theme;
 
     // "The file didn't exist here" is a state, not an error.
     if !deck.current.existed {
-        let placeholder = Paragraph::new(vec![
-            Line::from(""),
-            Line::from(Span::styled(
-                "the file does not exist at this point in history",
-                Style::default().fg(th.chrome()),
-            )),
-        ])
-        .alignment(Alignment::Center)
-        .wrap(Wrap { trim: true });
-        frame.render_widget(placeholder, area);
+        frame.render_widget(
+            placeholder(th, "the file does not exist at this point in history"),
+            area,
+        );
         return;
     }
+
+    // Scoped to a function that isn't present at this commit → placeholder.
+    if scoped && deck.scope_range.is_none() {
+        frame.render_widget(
+            placeholder(th, "this function does not exist at this point in history"),
+            area,
+        );
+        return;
+    }
+    // The line range to show: the whole file, or just the scoped function's.
+    let range = if scoped { deck.scope_range } else { None };
 
     let fg = Style::default().fg(th.foreground());
     let gutter = Style::default().fg(th.chrome());
@@ -74,6 +95,7 @@ pub fn render(
         .content
         .lines()
         .enumerate()
+        .filter(|(i, _)| range.is_none_or(|(a, b)| *i >= a && *i <= b))
         .map(|(i, text)| {
             let text_style = match deck.ghosts.get(&i) {
                 Some(&decay) => {
@@ -167,7 +189,7 @@ mod tests {
     fn fg_at(deck: &Deck, row: u16) -> Color {
         let mut terminal = Terminal::new(TestBackend::new(20, 3)).unwrap();
         terminal
-            .draw(|frame| render(frame, frame.area(), deck, &theme(), false, None))
+            .draw(|frame| render(frame, frame.area(), deck, &theme(), false, None, false))
             .unwrap();
         terminal.backend().buffer()[(2, row)].fg
     }
@@ -205,7 +227,7 @@ mod tests {
     fn blame_row_text(deck: &Deck, blame: Option<&[BlameLine]>, row: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(40, 3)).unwrap();
         terminal
-            .draw(|frame| render(frame, frame.area(), deck, &theme(), true, blame))
+            .draw(|frame| render(frame, frame.area(), deck, &theme(), true, blame, false))
             .unwrap();
         let buffer = terminal.backend().buffer();
         (0..40)
@@ -254,7 +276,7 @@ mod tests {
         // With the gutter off, the text column starts right after "N ".
         let mut terminal = Terminal::new(TestBackend::new(40, 3)).unwrap();
         terminal
-            .draw(|frame| render(frame, frame.area(), &deck, &theme(), false, None))
+            .draw(|frame| render(frame, frame.area(), &deck, &theme(), false, None, false))
             .unwrap();
         let buffer = terminal.backend().buffer();
         let row0: String = (0..40)
@@ -276,7 +298,7 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(20, 3)).unwrap();
         terminal
-            .draw(|frame| render(frame, frame.area(), &deck, &theme(), false, None))
+            .draw(|frame| render(frame, frame.area(), &deck, &theme(), false, None, false))
             .unwrap();
         let buffer = terminal.backend().buffer();
         // "1 " gutter is 2 cells; "o","n" get color a, "e" gets color b.
@@ -298,7 +320,7 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(20, 3)).unwrap();
         terminal
-            .draw(|frame| render(frame, frame.area(), &deck, &theme(), false, None))
+            .draw(|frame| render(frame, frame.area(), &deck, &theme(), false, None, false))
             .unwrap();
         let buffer = terminal.backend().buffer();
         let cell = buffer[(2, 1)].fg;
@@ -307,5 +329,46 @@ mod tests {
             matches!(cell, Color::Rgb(r, _, b) if r > b),
             "forward ghost should read red: {cell:?}"
         );
+    }
+
+    fn full_text(deck: &Deck, scoped: bool) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(24, 6)).unwrap();
+        terminal
+            .draw(|frame| render(frame, frame.area(), deck, &theme(), false, None, scoped))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..6)
+            .flat_map(|y| (0..24).map(move |x| (x, y)))
+            .map(|(x, y)| buffer[(x, y)].symbol().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn scoped_pane_clamps_to_the_function_range() {
+        let mut deck = deck_with("l0\nl1\nl2\nl3\nl4\n");
+        deck.scope_range = Some((1, 2)); // show only lines 1..=2
+
+        let text = full_text(&deck, true);
+        assert!(text.contains("l1"), "{text}");
+        assert!(text.contains("l2"), "{text}");
+        assert!(!text.contains("l0"), "{text}");
+        assert!(!text.contains("l3"), "{text}");
+        // Original line numbers are preserved (2 and 3, not renumbered from 1).
+        assert!(text.contains("2 l1"), "{text}");
+        assert!(text.contains("3 l2"), "{text}");
+
+        // Unscoped, the same deck shows the whole file.
+        let whole = full_text(&deck, false);
+        assert!(whole.contains("l0") && whole.contains("l4"), "{whole}");
+    }
+
+    #[test]
+    fn scoped_pane_shows_placeholder_when_the_function_is_absent() {
+        let mut deck = deck_with("a\nb\n");
+        deck.scope_range = None; // function not present at this commit
+        let text = full_text(&deck, true);
+        // "exist" is a single word, so line-wrap padding can't split it.
+        assert!(text.contains("exist"), "{text}");
+        assert!(!text.contains("1 a"), "{text}");
     }
 }
