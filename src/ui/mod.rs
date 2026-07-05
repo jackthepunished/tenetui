@@ -4,6 +4,7 @@
 
 mod filepane;
 mod help;
+mod map;
 pub mod overview;
 mod picker;
 mod statusbar;
@@ -30,7 +31,13 @@ pub fn draw(frame: &mut Frame, state: &AppState, keymap: &Keymap) {
     .split(frame.area());
 
     header(frame, chunks[0], state);
-    file_panes(frame, chunks[1], state);
+    if state.map_visible {
+        // The space-time map replaces the file pane(s); the pincer timeline and
+        // status bar stay, so scrubbing context never disappears.
+        map::render(frame, chunks[1], state);
+    } else {
+        file_panes(frame, chunks[1], state);
+    }
     timeline::render(frame, chunks[2], state);
     statusbar::render(frame, chunks[3], state);
 

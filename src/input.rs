@@ -49,11 +49,13 @@ pub enum Action {
     ToggleFocus,
     /// Open the function picker (scope the view to one function).
     OpenFunctions,
+    /// Toggle the space-time map view.
+    ToggleMap,
 }
 
 impl Action {
     /// Every action, in a stable display order (used to build the help overlay).
-    pub const ALL: [Action; 22] = [
+    pub const ALL: [Action; 23] = [
         Action::ScrubForward,
         Action::ScrubBackward,
         Action::TogglePlayback,
@@ -70,6 +72,7 @@ impl Action {
         Action::TogglePincer,
         Action::ToggleFocus,
         Action::OpenFunctions,
+        Action::ToggleMap,
         Action::ScrollDown,
         Action::ScrollUp,
         Action::Top,
@@ -103,6 +106,7 @@ impl Action {
             Action::TogglePincer => "toggle_pincer",
             Action::ToggleFocus => "toggle_focus",
             Action::OpenFunctions => "functions",
+            Action::ToggleMap => "map",
         }
     }
 
@@ -136,6 +140,7 @@ impl Action {
             Action::TogglePincer => "temporal pincer (turnstile)",
             Action::ToggleFocus => "switch pincer pane",
             Action::OpenFunctions => "scope to a function",
+            Action::ToggleMap => "space-time map",
         }
     }
 }
@@ -272,6 +277,7 @@ impl Default for Keymap {
         bind(KeyChord::plain(Char('t')), TogglePincer);
         bind(KeyChord::plain(Tab), ToggleFocus);
         bind(KeyChord::plain(Char('F')), OpenFunctions);
+        bind(KeyChord::plain(Char('m')), ToggleMap);
 
         Keymap { bindings }
     }

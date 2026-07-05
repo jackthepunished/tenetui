@@ -117,6 +117,8 @@ pub struct AppState {
     pub search: Option<String>,
     /// Whether the help overlay is showing (modal).
     pub help_visible: bool,
+    /// Whether the space-time map view is showing instead of the file pane(s).
+    pub map_visible: bool,
     /// `Some(name)` while scoped to a function (`arepo`): the file pane clamps to
     /// that function's range in each snapshot. `None` = whole-file view.
     pub scope: Option<String>,
@@ -159,6 +161,7 @@ impl AppState {
             blame: None,
             search: None,
             help_visible: false,
+            map_visible: false,
             scope: None,
             picker: None,
             should_quit: false,
@@ -249,6 +252,7 @@ pub fn update(state: &mut AppState, action: Action) {
         }
         Action::SearchStart => search_start(state),
         Action::ToggleHelp => state.help_visible = !state.help_visible,
+        Action::ToggleMap => state.map_visible = !state.map_visible,
         Action::TogglePincer => toggle_pincer(state),
         Action::ToggleFocus => toggle_focus(state),
         // Handled by the caller: opening the picker needs to parse the current

@@ -53,6 +53,7 @@ Scrub with `h`/`l`, press `space` to play, `?` for the full key list. That's it.
 | `/` | fuzzy-search commit messages |
 | `B` | toggle the blame gutter |
 | `t` | temporal pincer: two playheads, forward + inverted, side by side |
+| `m` | space-time map: history as a gravity-well constellation around the playhead |
 | `Tab` | switch focus between the pincer panes |
 | `j` / `k` | scroll the file |
 | `?` | help overlay |

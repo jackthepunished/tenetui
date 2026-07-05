@@ -52,3 +52,12 @@ Milestones are ordered; each produces something runnable. Claude Code: tick chec
 - [x] "Volatile files" overview screen: repo-wide churn ranking as entry point
 - [x] Rename following across file moves
 - [x] Temporal pincer mode: two playheads side-by-side, one scrubbing forward and one inverted, compare eras
+
+## M6 — The space-time map (post-v1, from a maintainer mockup)
+
+- [x] `m` toggles a braille-canvas map: warped gravity-well grid centered on the playhead, past commits left/blue, future right/red, churn as intensity, tag/merge landmarks, dashed paths radiating to the white-hot "you are here" pivot, real event-details panel
+- [ ] Real stats strip (cache hits / worker events) as an optional follow-up
+- [ ] Dual-pivot map in pincer mode (currently renders the focused deck)
+
+**Accept:** the map re-anchors live while scrubbing/playing; everything on it is real data in the Tenet palette.
+
