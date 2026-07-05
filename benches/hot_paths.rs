@@ -45,7 +45,7 @@ fn bench_diff(c: &mut Criterion) {
                 }
             })
             .collect();
-        let existing = std::collections::HashMap::new();
+        let existing = diff::Ghosts::default();
         group.bench_with_input(BenchmarkId::from_parameter(lines), &lines, |b, _| {
             b.iter(|| diff::compute_ghosts(black_box(&old), black_box(&new), black_box(&existing)));
         });

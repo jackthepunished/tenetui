@@ -3,7 +3,7 @@
 //! it. Keeping mutation here — and out of rendering — is what makes the UI a
 //! pure function of state; see docs/decisions.md "Immediate-mode state model".
 
-use crate::diff;
+use crate::diff::Ghosts;
 use crate::functions::FunctionDef;
 use crate::input::Action;
 use crate::repo::{BlameLine, CommitMeta, Snapshot};
@@ -46,9 +46,9 @@ pub struct Deck {
     pub playhead: usize,
     /// The file as it existed at `playhead`.
     pub current: Snapshot,
-    /// Lines changed by the last transition, decaying toward zero (0-indexed
-    /// line in `current`). See `diff::compute_ghosts`.
-    pub ghosts: HashMap<usize, u8>,
+    /// Lines changed by the last transition, decaying toward zero, with the
+    /// changed word ranges within each. See `diff::compute_ghosts`.
+    pub ghosts: Ghosts,
     /// Which way this deck last moved; sets its ghost hue. In pincer mode each
     /// deck's direction is fixed by its role (deck 0 forward, deck 1 inverted).
     pub direction: Direction,
@@ -75,7 +75,7 @@ impl Deck {
         Deck {
             playhead,
             current,
-            ghosts: HashMap::new(),
+            ghosts: Ghosts::default(),
             direction: Direction::Forward,
             scroll: 0,
             scroll_target: 0,
@@ -353,7 +353,7 @@ pub fn set_playhead(
     deck: usize,
     index: usize,
     snapshot: Snapshot,
-    ghosts: HashMap<usize, u8>,
+    ghosts: Ghosts,
     direction: Direction,
 ) {
     debug_assert!(index < state.timeline.len().max(1));
@@ -371,7 +371,7 @@ pub fn set_playhead(
         d.playhead = index;
         d.current = snapshot;
         d.direction = direction;
-        if let Some(top) = diff::freshest_changed_line(&ghosts) {
+        if let Some(top) = ghosts.freshest_changed_line() {
             d.scroll_target = u16::try_from(top.saturating_sub(FOLLOW_MARGIN))
                 .unwrap_or(u16::MAX)
                 .min(d.max_scroll());
@@ -640,7 +640,7 @@ mod tests {
             0,
             0,
             snapshot("only one line\n"),
-            HashMap::new(),
+            Ghosts::default(),
             Direction::Backward,
         );
 
@@ -657,7 +657,7 @@ mod tests {
     #[test]
     fn set_playhead_aims_the_follow_target_at_the_freshest_change() {
         let mut state = state_with(vec![commit("A"), commit("B")]);
-        let ghosts = HashMap::from([(10usize, diff::GHOST_MAX_DECAY)]);
+        let ghosts = Ghosts::from_decay(HashMap::from([(10usize, crate::diff::GHOST_MAX_DECAY)]));
 
         set_playhead(
             &mut state,
@@ -752,7 +752,7 @@ mod tests {
             0,
             1,
             snapshot("x\n"),
-            HashMap::new(),
+            Ghosts::default(),
             Direction::Forward,
         );
         assert!(state.blame.is_none());
@@ -889,7 +889,7 @@ mod tests {
                 "x
 ",
             ),
-            HashMap::new(),
+            Ghosts::default(),
             Direction::Backward,
         );
         // Old playhead (2) echoes on the timeline and joins the trail; the
@@ -908,7 +908,7 @@ mod tests {
                 "y
 ",
             ),
-            HashMap::new(),
+            Ghosts::default(),
             Direction::Backward,
         );
         assert_eq!(state.decks[0].turnstile, 0);

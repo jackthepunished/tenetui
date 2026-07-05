@@ -1,7 +1,8 @@
 //! The main pane: the file exactly as it existed at the playhead, with a
 //! line-number gutter, an optional blame gutter, syntax highlighting, and
-//! directional ghost highlighting on changed lines (which overrides syntax
-//! color, since the comet trail must read as red/blue).
+//! directional ghost highlighting on changed lines. Ghosting is word-level: the
+//! changed words burn hot in the direction color while the rest of the line
+//! half-glows, so the edit that moved is legible during playback.
 
 use crate::app::{Deck, Direction};
 use crate::diff::GHOST_MAX_DECAY;
@@ -24,6 +25,46 @@ fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         s.chars().take(max.saturating_sub(1)).collect::<String>() + "…"
+    }
+}
+
+/// Push a ghosted line's spans: the changed word ranges glow at full decay `t`,
+/// the rest of the line at a fraction of it (still red/blue, but quieter). An
+/// empty `ranges` (a whole-line insertion) glows the entire line.
+fn ghost_spans(
+    spans: &mut Vec<Span<'static>>,
+    text: &str,
+    ranges: &[(usize, usize)],
+    th: &Theme,
+    pole: Pole,
+    t: f32,
+) {
+    if ranges.is_empty() {
+        spans.push(Span::styled(
+            text.to_string(),
+            Style::default().fg(th.ghost(pole, t)),
+        ));
+        return;
+    }
+    let hot = Style::default().fg(th.ghost(pole, t));
+    let cold = Style::default().fg(th.ghost(pole, t * 0.35));
+    let is_hot = |ci: usize| ranges.iter().any(|&(a, b)| ci >= a && ci < b);
+
+    // Run-length group consecutive chars by hot/cold and emit one span per run.
+    let mut run = String::new();
+    let mut run_hot: Option<bool> = None;
+    for (ci, ch) in text.chars().enumerate() {
+        let h = is_hot(ci);
+        if run_hot.is_some_and(|prev| prev != h) {
+            let style = if run_hot == Some(true) { hot } else { cold };
+            spans.push(Span::styled(std::mem::take(&mut run), style));
+        }
+        run.push(ch);
+        run_hot = Some(h);
+    }
+    if !run.is_empty() {
+        let style = if run_hot == Some(true) { hot } else { cold };
+        spans.push(Span::styled(run, style));
     }
 }
 
@@ -109,13 +150,10 @@ pub fn render(frame: &mut Frame, area: Rect, deck: &Deck, theme: &Theme, view: P
         .enumerate()
         .filter(|(i, _)| range.is_none_or(|(a, b)| *i >= a && *i <= b))
         .map(|(i, text)| {
-            let text_style = match deck.ghosts.get(&i) {
-                Some(&decay) => {
-                    let t = f32::from(decay) / f32::from(GHOST_MAX_DECAY);
-                    Style::default().fg(th.ghost(ghost_pole, t))
-                }
-                None => fg,
-            };
+            let ghost_t = deck
+                .ghosts
+                .decay_of(i)
+                .map(|d| f32::from(d) / f32::from(GHOST_MAX_DECAY));
 
             let mut spans = Vec::new();
             if show_blame {
@@ -139,8 +177,8 @@ pub fn render(frame: &mut Frame, area: Rect, deck: &Deck, theme: &Theme, view: P
             ));
 
             // Precedence: cold-open fade > turnstile wash > ghost glow >
-            // syntax > plain. The first two are transient whole-pane states,
-            // so they may override syntax color for a few frames.
+            // syntax > plain. The first two are transient whole-pane states, so
+            // they may override syntax color for a few frames.
             if let Some(t) = fade {
                 spans.push(Span::styled(
                     text.to_string(),
@@ -152,21 +190,26 @@ pub fn render(frame: &mut Frame, area: Rect, deck: &Deck, theme: &Theme, view: P
                     text.to_string(),
                     Style::default().fg(th.ghost(ghost_pole, 0.20 + 0.35 * frac)),
                 ));
-            } else {
-                // A ghosting line glows in one direction color, overriding
-                // syntax — the comet trail must read as red/blue. Otherwise
-                // use syntax colors if we have them, else plain foreground.
-                match (
-                    deck.ghosts.contains_key(&i),
-                    deck.highlighted.as_ref().and_then(|h| h.get(i)),
-                ) {
-                    (false, Some(runs)) if !runs.is_empty() => {
-                        for (piece, color) in runs {
-                            spans.push(Span::styled(piece.clone(), Style::default().fg(*color)));
-                        }
-                    }
-                    _ => spans.push(Span::styled(text.to_string(), text_style)),
+            } else if let Some(t) = ghost_t {
+                // A ghosting line reads red/blue, overriding syntax — but only
+                // the *changed words* burn hot; the rest of the line half-glows,
+                // so the edit that moved is legible during playback.
+                ghost_spans(
+                    &mut spans,
+                    text,
+                    deck.ghosts.hot_ranges(i),
+                    th,
+                    ghost_pole,
+                    t,
+                );
+            } else if let Some(runs) = deck.highlighted.as_ref().and_then(|h| h.get(i))
+                && !runs.is_empty()
+            {
+                for (piece, color) in runs {
+                    spans.push(Span::styled(piece.clone(), Style::default().fg(*color)));
                 }
+            } else {
+                spans.push(Span::styled(text.to_string(), fg));
             }
             Line::from(spans)
         })
@@ -181,6 +224,7 @@ pub fn render(frame: &mut Frame, area: Rect, deck: &Deck, theme: &Theme, view: P
 mod tests {
     use super::*;
     use crate::app::Deck;
+    use crate::diff::Ghosts;
     use crate::repo::Snapshot;
     use crate::theme::ColorDepth;
     use git2::Oid;
@@ -208,7 +252,8 @@ mod tests {
     fn deck_with_ghost(direction: Direction, decay: u8) -> Deck {
         let mut deck = deck_with("one\ntwo\nthree\n");
         deck.direction = direction;
-        deck.ghosts = HashMap::from([(1usize, decay)]); // "two" is the changed line
+        // "two" (line 1) is the changed line; no specific word range.
+        deck.ghosts = Ghosts::from_decay(HashMap::from([(1usize, decay)]));
         deck
     }
 
@@ -241,7 +286,7 @@ mod tests {
 
         let mut nearly_faded = deck_with_ghost(Direction::Forward, 1);
         let nearly_faded_fg = fg_at(&nearly_faded, 1);
-        nearly_faded.ghosts.clear();
+        nearly_faded.ghosts = Ghosts::default();
         let no_ghost_fg = fg_at(&nearly_faded, 1);
 
         assert_eq!(base_fg, no_ghost_fg);
@@ -484,5 +529,40 @@ three
             matches!(after, Color::Rgb(r, _, b) if r == b || (i16::from(r) - i16::from(b)).abs() < 40),
             "wash should clear when the turnstile finishes: {after:?}"
         );
+    }
+
+    #[test]
+    fn word_level_ghost_burns_changed_words_hotter_than_the_rest() {
+        // "hello there" -> "hello world": only "world" (cols 6..) is hot.
+        let mut deck = deck_with(
+            "hello world
+",
+        );
+        deck.direction = Direction::Forward;
+        deck.ghosts = crate::diff::compute_ghosts(
+            "hello there
+",
+            "hello world
+",
+            &Ghosts::default(),
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(24, 2)).unwrap();
+        terminal
+            .draw(|frame| render(frame, frame.area(), &deck, &theme(), PaneView::default()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        // Gutter "N " is 2 cols: 'h' of "hello" at col 2, 'w' of "world" at col 8.
+        let redness = |c: Color| match c {
+            Color::Rgb(r, _, b) => i16::from(r) - i16::from(b),
+            _ => 0,
+        };
+        let cold = redness(buffer[(2, 0)].fg); // unchanged word — half-glow
+        let hot = redness(buffer[(8, 0)].fg); // changed word — full glow
+        assert!(
+            hot > cold + 20,
+            "changed word should burn hotter: hot={hot} cold={cold}"
+        );
+        assert!(cold > 0, "the rest of the line still reads red: {cold}");
     }
 }

@@ -68,7 +68,7 @@ Milestones are ordered; each produces something runnable. Claude Code: tick chec
 - [x] Timeline heat-echo: columns the playhead just swept through glow toward their pole's saturated end and cool over ~10 frames
 - [x] Map comet trail: the pivot's recent positions fade behind it in the space-time map
 - [x] SATOR square watermark in the help overlay
-- [ ] Word-level ghosting (changed words hot, rest of line half-glow)
+- [x] Word-level ghosting (changed words hot, rest of line half-glow)
 - [ ] Dual-pivot pincer map
 
 **Accept:** playback and scrubbing visibly *move* — trails, echoes, and flips all decay smoothly at ~30fps with zero I/O per frame.
